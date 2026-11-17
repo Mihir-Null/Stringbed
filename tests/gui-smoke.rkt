@@ -1,0 +1,35 @@
+#lang racket/gui
+(require rackunit racket/file racket/list
+         "../stringbed/model.rkt" "../stringbed/session.rkt" "../stringbed/gui.rkt")
+;; Run under a display, e.g. xvfb-run racket tests/gui-smoke.rkt.
+(define dir (make-temporary-file "stringbed-gui-~a" 'directory))
+(dynamic-wind
+ void
+ (lambda ()
+   (define path (build-path dir "workspace.rktd"))
+   (call-with-output-file path (lambda (o) (write (new-workspace "gui-demo") o)))
+   (define s (open-session path))
+   (define r (load-registry))
+   (execute! s r '(add package "search"))
+   (define frame (create-editor s r))
+   (check-true (is-a? frame frame%))
+   (send frame show #t)
+   (yield)
+   (define (descendants widget)
+     (cons widget (if (is-a? widget area-container<%>)
+                      (append-map descendants (send widget get-children)) '())))
+   (define (find-control class label)
+     (or (findf (lambda (w) (and (is-a? w class) (equal? (send w get-label) label)))
+                (descendants frame))
+         (error 'gui-test "missing control ~a" label)))
+   (define attribute (find-control text-field% "attribute (attribute)"))
+   (send attribute set-value "fd")
+   (send (find-control button% "Set") command (new control-event% [event-type 'button]))
+   (check-equal? (hash-ref (hash-ref (node-by-id (session-workspace s) "search") 'params) 'attribute) "fd")
+   (send (find-control button% "Undo") command (new control-event% [event-type 'button]))
+   (check-equal? (hash-ref (hash-ref (node-by-id (session-workspace s) "search") 'params) 'attribute) "ripgrep")
+   (send frame show #f)
+   (check-equal? (hash-ref (car (hash-ref (session-workspace s) 'nodes)) 'id) "search"))
+ (lambda () (delete-directory/files dir)))
+
+(displayln "GUI smoke passed: descriptor edit and undo")
