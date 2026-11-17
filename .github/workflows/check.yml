@@ -1,0 +1,19 @@
+name: prototype checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test runtimes
+        run: sudo apt-get update && sudo apt-get install -y racket nix-bin xvfb
+      - name: Core and process-boundary tests
+        run: raco test tests/core.rkt
+      - name: Nix parser and evaluator integration
+        run: raco test tests/nix-integration.rkt
+      - name: Native GUI smoke
+        run: xvfb-run -a racket tests/gui-smoke.rkt
+      - name: CLI and terminal workflow
+        run: bash tests/cli.sh

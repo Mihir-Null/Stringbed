@@ -1,0 +1,105 @@
+#lang racket/base
+(require rackunit racket/file racket/port racket/runtime-path racket/list
+         "../stringbed/model.rkt" "../stringbed/extension.rkt" "../stringbed/compiler.rkt"
+         "../stringbed/session.rkt" "../stringbed/operations.rkt")
+(define-runtime-path home "../examples/home.sbd")
+(define-runtime-path server "../examples/server.sbd")
+(define-runtime-path extension "../examples/extensions/web-service.rkt")
+(define r (load-registry))
+(define w (read-workspace home))
+(test-case "reader accepts exactly one data object, not reader code"
+  (for ([s '("1 2" "#reader \"evil.rkt\" 1" "#lang racket\n42" "#0=(a . #0#)")])
+    (check-exn exn:fail? (lambda () (call-with-input-string s read-data)))))
+(test-case "schema and stable ID invariants"
+  (check-exn exn:fail? (lambda () (workspace-valid! (hash-set w 'schema 99))))
+  (check-exn exn:fail? (lambda () (add-node w (car (hash-ref w 'nodes))))))
+(test-case "literal Nix escaping, including interpolation"
+  (check-equal? (nix-value "a\"\\${evil}\n") "\"a\\\"\\\\\\${evil}\\n\"")
+  (check-equal? (nix-value #f) "false"))
+(test-case "package references cannot inject Nix"
+  (check-exn exn:fail? (lambda () (attr-path "x; builtins.abort \"oops\""))))
+(test-case "determinism and authored provenance"
+  (check-equal? (compile-module w r) (compile-module w r))
+  (check-equal? (map (lambda (p) (hash-ref p 'id)) (provenance w r)) '("search" "git"))
+  (check-true (regexp-match? #rx"home.*packages" (compile-module w r))))
+(test-case "external form supplies fields, validation, and multiple definitions"
+  (define registry (load-registry (list extension)))
+  (define sw (read-workspace server))
+  (check-equal? (length (form-fields (hash-ref registry 'web-service))) 2)
+  (check-equal? (length (hash-ref (car (provenance sw registry)) 'definitions)) 3)
+  (check-true (regexp-match? #rx"8080" (compile-module sw registry)))
+  (check-exn exn:fail? (lambda () (compile-module sw r)))
+  (check-equal? sw (call-with-input-string (workspace-text sw) read-data)))
+(test-case "unknown forms survive inspection, but cannot compile"
+  (define unknown (hash-set (car (hash-ref w 'nodes)) 'kind 'future))
+  (define uw (hash-set w 'nodes (list unknown)))
+  (check-equal? uw (workspace-valid! uw))
+  (check-exn exn:fail? (lambda () (compile-module uw r))))
+(test-case "failed edit is atomic; undo restores the exact prior model"
+  (define s (open-session home))
+  (check-exn exn:fail? (lambda () (execute! s r '(set "search" attribute "x;bad"))))
+  (check-equal? (session-workspace s) w)
+  (check-equal? (session-history s) '())
+  (execute! s r '(note "search" "personal note"))
+  (execute! s r '(remove "search"))
+  (execute! s r '(undo))
+  (check-equal? (hash-ref (node-by-id (session-workspace s) "search") 'note) "personal note")
+  (execute! s r '(undo))
+  (check-equal? (session-workspace s) w))
+(test-case "save round trip and external conflict"
+  (define p (make-temporary-file))
+  (dynamic-wind void
+    (lambda ()
+      (copy-file home p #t)
+      (define s (open-session p))
+      (execute! s r '(note "search" "saved")) (save-session! s)
+      (check-equal? (read-workspace p) (session-workspace s))
+      (display-to-file "external edit" p #:exists 'truncate)
+      (check-exn exn:fail? (lambda () (save-session! s)))
+      (check-equal? (file->string p) "external edit"))
+    (lambda () (delete-file p))))
+(test-case "exports refuse to overwrite existing directories"
+  (define parent (make-temporary-file "stringbed-test-~a" 'directory))
+  (dynamic-wind void
+    (lambda ()
+      (check-exn exn:fail? (lambda () (export-workspace w r parent)))
+      (define out (build-path parent "export"))
+      (export-workspace w r out)
+      (check-true (file-exists? (build-path out "provenance.json")))
+      (check-equal? (file->string (build-path out "configuration.nix")) (compile-module w r)))
+    (lambda () (delete-directory/files parent))))
+(test-case "process boundary rejects target injection and uses fixed SSH argv"
+  (define seen #f)
+  (parameterize ([current-runner (lambda (exe args) (set! seen (cons exe args)) "ok")])
+    (check-equal? (inspect-machine "demo@example.org") "ok")
+    (check-equal? (car seen) "ssh")
+    (check-not-false (member "demo@example.org" (cdr seen)))
+    (check-exn exn:fail? (lambda () (inspect-machine "-oProxyCommand=bad")))
+    (check-exn exn:fail? (lambda () (inspect-machine "host;bad")))))
+(test-case "Nix lifecycle preserves locks and validates all systems"
+  (define dir (make-temporary-file "stringbed-ops-~a" 'directory))
+  (dynamic-wind void
+    (lambda ()
+      (display-to-file "{}" (build-path dir "flake.nix"))
+      (check-exn exn:fail? (lambda () (nix-operation 'check dir)))
+      (display-to-file "{}" (build-path dir "flake.lock"))
+      (define seen #f)
+      (parameterize ([current-runner (lambda (exe args) (set! seen args) "ok")])
+        (check-equal? (nix-operation 'check dir) "ok")
+        (check-not-false (member "--all-systems" seen))
+        (check-not-false (member "--no-update-lock-file" seen))))
+    (lambda () (delete-directory/files dir))))
+(test-case "export uses one expansion snapshot for Nix and provenance"
+  (define count 0)
+  (define registry (make-registry (list (form 'counter "test" '()
+    (lambda (_ __) (set! count (add1 count)) (list (assignment '("counter") count)))))))
+  (define cw (hash-set (new-workspace) 'nodes (list (hash 'id "counter" 'kind 'counter 'params (hash) 'note "" 'docs '()))))
+  (define dir (make-temporary-file "stringbed-expand-~a" 'directory))
+  (dynamic-wind void
+    (lambda ()
+      (define out (build-path dir "output"))
+      (export-workspace cw registry out)
+      (check-equal? count 1)
+      (check-true (regexp-match? #rx"counter.*1" (file->string (build-path out "configuration.nix"))))
+      (check-true (regexp-match? #rx"counter.*1" (file->string (build-path out "provenance.json")))))
+    (lambda () (delete-directory/files dir))))

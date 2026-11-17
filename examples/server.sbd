@@ -1,0 +1,8 @@
+#hash((schema . 1) (name . "demo-server") (target . nixos)
+      (system . "x86_64-linux") (user . "demo") (home-directory . "/home/demo")
+      (state-version . "24.11")
+      (inputs . #hash((nixpkgs . "github:NixOS/nixpkgs/nixos-unstable")))
+      (nodes . (#hash((id . "website") (kind . web-service)
+                     (params . #hash((port . 8080) (root . "/srv/www")))
+                     (note . "Example only: add hardware and boot configuration before building a real host.")
+                     (docs . ("https://nginx.org/en/docs/"))))))
