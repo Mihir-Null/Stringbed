@@ -1,34 +1,195 @@
-# Prototype validation
+# Workbench validation
 
-Validated 17 November 2026 with Racket 8.16 and Nix 2.26.3 on Linux.
+## Daemon access regression follow-up (2026-11-18)
 
-| Verification | Result |
+Run [44214675265](https://github.com/Mihir-Null/Stringbed/actions/runs/44214675265)
+tested `ef77a6f`, not the current VUI/builder revision. Its apt-installed Nix
+2.18.1 failed while inspecting `/nix/var/nix/daemon-socket/socket`, before the
+generated expressions could be checked. The installation log also reports
+`Could not execute systemctl`. Installing `nix-bin` alone did not establish a
+usable runner store/service environment. The log does not identify which socket
+path component denied traversal; no specific owner, group or mode is inferred.
+
+The existing `7be4f78` workflow fix replaces apt Nix with
+`cachix/install-nix-action@v31`, requires `nix store ping`, and runs interface tests
+in the packaged development shell. The latest baseline run
+[44263069728](https://github.com/Mihir-Null/Stringbed/actions/runs/44263069728)
+passed at `54217c3`, including the locked NixOS/Home Manager queries, fleet
+contract build and disposable SSH checks. Those results predate this follow-up.
+
+`tests/nix-integration.rkt` now passes `--store dummy://` to each real
+`nix-instantiate` invocation. These checks parse generated flakes/modules and
+evaluate values against local package fixtures; they perform no store operations.
+The [Nix 2.18 manual](https://nix.dev/manual/nix/2.18/command-ref/new-cli/nix3-help-stores)
+documents this store for evaluation without accessing a Nix store. All existing
+assertions remain mandatory, and a new case requires invalid syntax and an
+explicit evaluator exception to fail. No environment override is exported to the
+workflow, native query tests or fleet builds; their real store checks remain
+mandatory. A missing Nix executable still fails the suite.
+
+Fresh local results for this follow-up, using relocated Racket 8.16 and Nix
+2.26.3 (no runtime paths were added to the repository):
+
+| Check | Result |
 |---|---|
-| Core RackUnit tests | 13 test cases passed: reader boundaries, schema/ID rules, escaping, extension expansion, unknown forms, undo, save conflict, safe export, process arguments, lock behavior and single expansion snapshot |
-| Nix integration | 8 checks passed: home/server module and flake parsing, strict Nix evaluation with fixture packages, string literal evaluation |
-| Native GUI | Xvfb smoke passed: create/show window, edit a descriptor-generated field through its actual Set button, verify model, click Undo and verify restoration |
-| CLI and terminal | Init, add/configure/note/why, draft undo/save, numeric menu add/configure/save, Racket generator, external extension and local read-only inspection passed |
-| Real Home Manager | Generated home flake locked and passed `nix flake check --no-build --all-systems --no-update-lock-file`; activation derivation evaluated |
-| Real NixOS options | Generated server extension evaluated through nixosSystem: nginx port 8080 and localhost document root `/srv/www` |
+| Syntax/value suite with `NIX_REMOTE=unix:///nonexistent-stringbed-daemon/socket` | 11 tests passed, including both deliberate Nix failures |
+| Core/durability/query/context/protocol/builder/lifecycle/UI/TUI/workbench | 110 tests passed |
+| CLI/menu and legacy terminal PTY | Passed |
+| `tests/real-nix.sh` | 6 locked query, 3 native type/package and 1 native builder cases passed; an initial 45-second attempt timed out, then the complete run passed with a longer bound |
+| Real store access | `nix store ping` passed using this host's local fallback store |
+| `tests/fleet-library.sh` | Evaluation passed; initial build failed on missing `/usr/bin/bash-static`; full script then passed with local-only `NIX_CONFIG` settings `sandbox-paths =` and `sandbox = false` |
+| Shell syntax and whitespace | `bash -n` on all four check scripts and `git diff --check` passed |
 
-Real evaluation used nixpkgs `d5cc6833999746cffdfe0598f7bc801a57b887a9`
-and Home Manager `5b76c5b8eec25fdbce4f43309b3ee10584374a26`.
-The tool's own nixpkgs input is pinned in the committed flake.lock.
+The exact Nix 2.18.1 socket permissions were not recreated locally. Nix 2.26.3
+also passed the unmodified syntax/value suite with the nonexistent remote; that
+baseline is not a reproduction of the older failure. The explicit dummy store
+removes reliance on default store initialization across versions, as documented
+by Nix. Fresh Emacs/VUI, GUI and disposable SSH checks were not run locally in
+this follow-up; their successful baseline CI results above are separate evidence.
+The sandbox overrides were not committed and do not weaken CI's store checks.
 
-No complete system/home closure was built or activated. The server example does
-not include boot/hardware configuration. No remote SSH target was contacted;
-remote process arguments were tested with an injected runner. GUI testing covers
-interaction with generated fields and undo, not every platform/dialog/accessibility
-behavior. Darwin and ARM runtime behavior are unverified. GitHub CI status should
-be checked on the PR independently of these local results.
+## VUI and visual module builder
 
-A separate review found and corrected numeric menu dispatch, double-read save
-baselines, export directory ownership, cross-system check flags, multiple expansion
-snapshots, and invalid CLI exit behavior. These corrections have regression tests.
+The 0.4 pass pins VUI 1.4.0 at
+`004dd852746d8af838107dd7e3f44c5bbea04d79`. Forms use its actual mounted components
+and deferred state updates; Magit Section and tabulated catalogues retain their
+existing view ownership. The builder has a versioned data definition, deterministic
+Racket projection, guarded working-directory saves and explicit transactional pins.
 
-The development environment lacked preinstalled Racket/Nix. Relocated Debian
-runtime packages were used for local verification; repository code and CI do not
-depend on those environment-specific paths. A multi-file raco invocation spawned
-children without the relocated runtime configuration and failed; running the
-individual test files through the configured runtime succeeded. This was a local
-runtime-layout limitation, not an ignored application test failure.
+| Verification | Evidence |
+|---|---|
+| Builder semantics | 9 cases: typed data and binding rejection, generated/preview equivalence, standalone generated code, repeated-save revision guards and exact backups, resource preservation, source/spec drift, captured bundle relocation, immutable derivatives and explicit builtin identity refresh |
+| Builder protocol | 9 cases: save/pin/use/reopen, pinned derivatives, incompatible repin rollback, stale review/lock rejection, data-only boundaries, exact composition identities, native-status distinction, portable captured children and builtin refresh |
+| Emacs/VUI/builder | 50 ERT cases passed together with no skips: exact JSON and mixed enums, invalid raw edits, nullable controls, focus/scroll retention, stale previews and callbacks, closed-editor completion, transport failure cleanup, composition metadata, repeated saves and backend persistence |
+| Existing contracts | Core, durability, UI extension, workbench, lifecycle and TUI suites passed (57 cases); existing protocol, query context and Nix query suites also passed |
+| CLI and legacy terminal | CLI/menu edit/save/undo/generator checks and real ANSI PTY restoration passed |
+| Ordinary Emacs terminal | Full keyboard flow passed with actual VUI controls: package selection, Boolean option, clearing a focused note without losing focus, typing/applying/saving, provenance, reopen/undo, exact backup and terminal restoration |
+| Builder terminal | Real keyboard create/parameter/option-picker/composition flow, generated preview, separate native-validation status, save twice, pin/use, workspace persistence, reopen, derivative edit/repin, prior snapshot integrity and terminal restoration passed |
+| Native builder validation | Actual pinned NixOS `programs.git.enable` accepted `true`, rejected integer `5`, and left the workspace draft unchanged; process failures report `error` rather than a false type rejection |
+| Native control metadata | 3 native type/package cases passed, including `types.anything` as an advanced JSON control accepting scalar and list values; option metadata cache version advanced so old controls are not reused |
+| VUI dependency | Exact pinned VUI derivation built; packaged Emacs loaded `vui` and `vui-components` under `--batch -Q` |
+| Standalone package | `.#emacs` built; Emacs 31.1/Racket 9.3 loaded all compiled Stringbed/VUI/builder libraries under `-Q`. The built launcher opened a workspace and restored its terminal; the full ordinary Emacs PTY passed against the same immutable source snapshot |
+
+Terminal fixtures use the real Racket backend and an explicitly synthetic Nix
+executable for repeatable discovery/type responses. Native Nix checks are separate;
+fixture responses do not establish upstream package builds or machine behavior.
+The visual builder is not an inverse for arbitrary Racket, and native option type
+validation is not full workspace evaluation or activation.
+
+## Previous Emacs checkpoint
+
+The 0.3 pass adds an ordinary Emacs package and pinned terminal launcher. The
+terminal test uses actual keyboard input and the real Racket backend, with an
+explicit synthetic Nix executable for deterministic catalogue/type replies.
+Real Nix semantics are checked separately; fixture replies are not evidence of
+upstream package builds or machine activation.
+
+| Verification | Evidence |
+|---|---|
+| Legacy preservation | Core, durability, existing queries, lifecycle, UI hooks, TUI and workbench suites; CLI/menu, real ANSI terminal restoration and native GUI interaction passed |
+| Protocol | 12 cases: session/revision checks, auto IDs and actual package selection, typed rejection, JSON values, annotations/save/reopen/undo, old API locks, data-only unknown forms, sibling-sensitive expansion, stale queries/commits, cancellation races, lock cleanup and scoped package-collection provenance |
+| Query contexts | 8 cases: explicit first pin, exact lock reuse, unchanged-input lock seeding, package cache reuse, tamper detection, field errors, safe evaluation/build dispatch and cancelled/concurrent preparation cleanup |
+| Emacs | 18 ERT cases: JSON shape preservation, stale catalogue/forms, typed controls, legacy invalid values, field errors/keymaps, source protection, unsaved draft guards, actual before/after changes, multi-scope completion and real backend persistence |
+| Terminal Emacs | Description search, package metadata and selection, Boolean option control, folding and widget focus, note/save, readable provenance, selected Nix, reopen/undo, exact original backup and terminal restoration |
+| Native Nix types | Pinned Boolean, enum, integer, number, nullable, list and attribute-set controls; invalid scalar/nested values and unknown options rejected; throwing defaults remain inspectable |
+| Native package/source | Exact ripgrep 15.2.0 lookup returned homepage and an existing absolute Nix source location |
+| Native NixOS scope | `services.openssh.enable` discovered as Boolean and rejected value `5`; `networking.hostName` returned effective value and definition locations |
+| Integrated Home Manager | `home:demo` option discovery and effective `programs.git.enable = true` passed; incomplete definition origins remain explicitly labelled |
+| Packaging | The `7be4f78` workflow completed successfully, including the packaged Emacs environment and launcher in `nix develop`; Stringbed, Magit Section and Transient loaded under `--quick` |
+
+The preceding PR revision's GitHub workflow failed because apt-installed Nix
+could not access its daemon socket. CI now installs Nix explicitly and runs the
+interface checks in `nix develop`, so Emacs package availability under `--quick`
+does not depend on distribution site initialization. Workflow run
+[44257224461](https://github.com/Mihir-Null/Stringbed/actions/runs/44257224461)
+passed at `7be4f78`. New VUI/builder checks are recorded separately below.
+
+The local execution environment lost parts of `/nix/store` after the successful
+launcher build. A bounded repair did not recover the full closure. The final
+source passed the tests above, and the subsequent remote CI run passed its
+packaged development environment checks.
+
+```sh
+nix develop --command bash tests/check.sh
+bash tests/real-nix.sh  # scoped evaluation plus native query-type fixture
+nix build .#emacs      # pinned standalone terminal launcher
+```
+
+Broad package searching evaluates upstream nixpkgs and can remain expensive;
+the UI exposes progress, cancellation and exact lookup. Scope-specific overlays
+are not represented in the upstream package catalogue. Machine activation remains
+a separate gate.
+
+## Prior fleet-library baseline
+
+Validated on Linux with Racket 8.16 and Nix 2.26.3. These are executed local
+checks from the previous workbench milestone; GitHub CI is a separate result
+attached to the pull request. They are not claims of fresh full closure builds
+for the Emacs pass.
+
+| Verification | Evidence |
+|---|---|
+| Core | 13 RackUnit cases: safe data reader, schema/IDs, escaping, expansion, undo, concurrent save detection, export consistency |
+| Durability | 9 cases: explicit migration, exact backups, persistent history, source/journal conflicts, portable verified bundles, tampering, fresh API identities |
+| Nix queries/compiler | 5 portable cases plus 1 real integration case: scoped export, canonical option paths, exact locked package metadata, evaluated why, fresh external path values |
+| Lifecycle | 13 cases: adapter/source matching, cross-system selection, legacy HM rejection, stateful target locks, drift, apply/rollback, uncertain outcomes, process limits |
+| UI plugins | 10 cases: dispatch, reserved commands, arity, diff/filter, fresh reload |
+| TUI | 7 cases plus real PTY interaction: rendering/navigation/command behavior; alternate screen, diff/quit, exact terminal-state restoration |
+| Workbench integration | 3 cases: home/scoped edits and nested data, persistent undo/read-only behavior, pinned form+UI bundle identity and optional UI export |
+| Nix parser/evaluator | 8 checks on generated home/server modules and flakes, values and escaping |
+| Native GUI | Real Xvfb interaction: descriptor edit, undo, plugin command, diff, source navigation and filtering |
+| CLI/menu | Init/edit/note/why, numeric menu, undo/save, generators, external forms, inspection and invalid arguments |
+| Disposable SSH | Real loopback sshd: quoting, exclusive lock collision, failure status and timeout; no activation |
+| Independent fleet library | NixOS and Home Manager derivations evaluated; x86_64/aarch64 contract evaluation passed; x86_64 contract artifact built |
+| Full generic home closure | `fixture-home` built successfully; no activation |
+
+Real integrated evaluation and fleet fixtures use nixpkgs
+`d5cc6833999746cffdfe0598f7bc801a57b887a9` and Home Manager
+`5b76c5b8eec25fdbce4f43309b3ee10584374a26`, recorded in the library lock.
+Integrated home `programs.git.enable` evaluated true; exact package lookup found
+ripgrep 15.2.0; system hostname inspection returned native definition locations.
+Integrated home definition origins remain explicitly incomplete in API results.
+
+## Reproduce
+
+```sh
+bash tests/check.sh          # Racket, Nix, Python 3, Xvfb
+bash tests/real-nix.sh       # locked system + integrated home queries
+bash tests/fleet-library.sh # independent evaluation and small contract build
+sudo bash tests/remote-fixture.sh  # disposable loopback sshd only
+nix build path:./packages/fleet-library#fixture-home
+```
+
+For a full system closure, separately run
+`nix build path:./packages/fleet-library#fixture-system`. Neither build activates.
+Lifecycle activation tests use an injected runner with stateful generations and
+locks. They do not prove real service/file activation or failure recovery in a
+booted NixOS VM. That rehearsal, Darwin runtime behavior, and actual EmptyNet
+reconstruction/parity remain gates before fleet cutover.
+
+## Environment limits and failures investigated
+
+The local runtime uses relocated Debian packages; individual configured Racket
+invocations succeed. Concurrent edits initially left stale compiled dependency
+caches; clearing them and rerunning the affected suites resolved those link errors.
+No repository code depends on the temporary runtime paths.
+
+This environment blocks Unix sockets. Xvfb therefore used loopback TCP; the home
+fixture disables upstream manual generation, whose Python multiprocessing build
+requires Unix sockets. The initial full home build failed at that documentation
+builder; the final fixture home closure built successfully. This fixture choice
+does not disable documentation in consumer machines.
+
+Local Nix also had a missing `/usr/bin/bash-static` sandbox mapping. Builds passed
+with the environment-only overrides `--option sandbox-paths '' --option sandbox
+false`; project CI retains the host's normal sandbox settings. Exhaustive nixpkgs
+search and combined all-system full derivation evaluation exceeded workspace
+resources. Exact package lookup and separate host/ARM contract checks succeeded.
+No full NixOS closure, Darwin closure, remote activation or live fleet operation
+is claimed tested.
+
+Independent review found and corrected wrong-adapter activation, stale export/source
+pairing, evaluator/target architecture confusion, cross-plan lock races and leaks,
+legacy Home Manager rollback capability, and extension struct identity. Regression
+tests cover those boundaries. Scope and remaining design choices are recorded in
+[architecture.md](../architecture.md).

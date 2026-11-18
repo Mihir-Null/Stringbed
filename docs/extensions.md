@@ -1,39 +1,48 @@
-# Extension API v0
+# Extension API
 
-A trusted Racket module exports `forms`, a list of `form` values from
-`stringbed/extension.rkt`. `form` contains a symbolic kind, description, field list
-and `(lambda (params workspace) ...)` expansion function. Every form uses this
-same API, including built-ins.
+A trusted module exports `forms`, a list of `form` values from
+`stringbed/extension`. A form contains kind, description, fields and a
+`(params workspace) -> definitions` function. Fields specify name, type, default
+and help text. Types are string, attribute, boolean, integer, port and recursive
+`value` data (strings, booleans, integers, lists and attribute sets).
 
-`field` holds a symbolic name, type, default and description. Supported field types
-are `string`, `attribute`, `boolean`, `integer`, `port`, and `value` (string, boolean,
-integer or list of strings). Descriptors drive GUI fields and terminal prompts.
-Unknown fields and invalid values are rejected before an edit is committed.
+Expansion returns `assignment` or `nix-import` values. Assignments use literal
+attribute-name segments. `nix-expr` and `nix-path` are explicit trusted capabilities;
+normal data is escaped by the compiler. Keep expansion deterministic and free of
+side effects. Nix owns merging and errors; `_file` labels carry stable node IDs.
+The workspace passed to a home-scoped form has target `home` and that home's metadata.
 
-Expansion returns `assignment` values (list of literal attribute-name segments,
-value) or `nix-import` values (trusted Nix expression string). Values include
-strings, booleans, integers, lists, and explicit `nix-expr` references. Never put
-untrusted input into raw expressions; ordinary strings are escaped. Each generated
-definition is a separate Nix module carrying `_file = "stringbed:NAME/ID"`, letting
-Nix own merging and conflicts. `why` reports authored definitions, not final
-winning evaluated values.
+For portable bundles use `(require stringbed/extension)`, not relative paths that
+escape the bundle. `pin FILE ID DIRECTORY ENTRY` captures every file in DIRECTORY;
+keep it small and exclude generated files yourself. Snapshots verify before every
+load. Development `--extension` paths are relative to the workspace. Reload uses
+fresh namespaces and rejects duplicate kinds before replacing the active registry.
+Hashes do not sandbox code or pin deliberately imported external dependencies.
 
-The registry is an explicit value, constructed with `make-registry`; duplicate
-kinds fail. Use `load-registry` for built-ins plus trusted external modules. Module
-loading uses Racket's normal dynamic-require cache; restart the interface after
-changing extension code in v0. Live reload/versioning is a later milestone.
+## UI plugins
 
-The first descriptor editor is generic. Custom widgets and extension-defined
-commands are not registered through v0 descriptors. The interfaces themselves can
-be replaced: import model/session/compiler, construct a registry, and drive
-`execute!`. This preserves semantic operations without requiring a particular UI.
+Export `ui-plugin`, a `plugin` struct from `stringbed/ui-extension`:
 
-Programmable authoring uses `dsl.rkt`, which returns ordinary workspace data.
-Arbitrary Racket generators are supported through explicit `generate`. Data files
-never evaluate code. Generated forms are materialized copies; their relationship
-to generator source must currently be retained by the user, not inferred.
+```racket
+(plugin
+ (hash 'my-command (lambda (session registry arguments) ...))
+ (hash 'my-kind (lambda (parent session registry node-id execute) ...))
+ (hash 'my-kind (lambda (session registry node-id ask execute) ...)))
+```
 
-Extensions should accept explicit parameters, avoid global state and side effects
-in expansion, and depend on generic Nix interfaces. Deterministic output is an
-extension contract, not a sandbox-enforced guarantee. The shipped fixture is
-independent of EmptyNet, agentic-stack and kittymacs.
+The three hashes hold command, GUI editor and TUI editor handlers. Commands cannot
+shadow reserved core operations. Editors should use the execute callback to retain
+validation, undo and diff behavior. Explicit plugins load with `--plugin FILE`;
+reload replaces complete plugin/registry values. Pinned form bundles can also export
+`ui-plugin`; the editor loads it from the verified snapshot. A UI-only bundle must
+still export an empty `forms` list. These hooks are trusted programs,
+not restricted widget descriptions. CLI plugin commands use the same dispatcher.
+
+`dsl.rkt` supplies optional constructors/compose helpers for arbitrary generators.
+`generate` records the generator entry path/hash, then materializes ordinary data.
+It does not reverse edits into the generator or claim a complete source closure.
+
+See [architecture](../architecture.md) for trust boundaries and
+[examples/extensions/web-service.rkt](../examples/extensions/web-service.rkt)
+for a minimal form. Keep upstream explanations in links and personal rationale in
+node annotations.

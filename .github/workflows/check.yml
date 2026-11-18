@@ -1,4 +1,4 @@
-name: prototype checks
+name: workbench checks
 on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
@@ -7,13 +7,19 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install test runtimes
-        run: sudo apt-get update && sudo apt-get install -y racket nix-bin xvfb
-      - name: Core and process-boundary tests
-        run: raco test tests/core.rkt
-      - name: Nix parser and evaluator integration
-        run: raco test tests/nix-integration.rkt
-      - name: Native GUI smoke
-        run: xvfb-run -a racket tests/gui-smoke.rkt
-      - name: CLI and terminal workflow
-        run: bash tests/cli.sh
+      - name: Install Nix with a working runner store
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install platform test services
+        run: sudo apt-get update && sudo apt-get install -y racket xvfb openssh-server
+      - name: Verify Nix store access
+        run: nix store ping
+      - name: Model, command, Nix parser, GUI and terminal checks
+        run: nix develop --command bash tests/check.sh
+      - name: Locked NixOS and integrated Home Manager queries
+        run: bash tests/real-nix.sh
+      - name: Independent fleet module contract
+        run: bash tests/fleet-library.sh
+      - name: Disposable SSH transport (no activation)
+        run: sudo bash tests/remote-fixture.sh

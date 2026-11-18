@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  printf 'Usage: stringbed-emacs WORKSPACE.sbd\n' >&2
+  exit 2
+fi
+if [[ ! -f "$1" ]]; then
+  printf 'Workspace does not exist: %s\n' "$1" >&2
+  exit 2
+fi
+stringbed_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export STRINGBED_WORKSPACE="$1"
+export STRINGBED_BACKEND_SOURCE="$stringbed_root/stringbed/main.rkt"
+export STRINGBED_RACKET="${STRINGBED_RACKET:-racket}"
+export PLTCOLLECTS="$stringbed_root:${PLTCOLLECTS:-}"
+
+# Read paths as environment data, never interpolate them into Lisp source.
+exec "${STRINGBED_EMACS:-emacs}" --no-window-system --quick \
+  -L "$stringbed_root/emacs" -l stringbed \
+  --eval '(setq stringbed-command (list (getenv "STRINGBED_RACKET") (getenv "STRINGBED_BACKEND_SOURCE") "serve"))' \
+  --funcall stringbed-standalone

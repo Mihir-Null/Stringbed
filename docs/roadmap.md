@@ -1,7 +1,16 @@
 # From prototype to EmptyNet migration
 
-The prototype proves editing and extension architecture. It is not a deployment
-cutover. Each milestone has an exit gate; no host should migrate on unit tests alone.
+The components through step 5 are implemented in the 0.2 workbench. This is not
+a deployment cutover. The original gates below remain acceptance criteria:
+source-span preservation, Darwin/full closure execution and booted-machine
+activation are not claimed complete. See [validation](validation.md) and the
+[architecture](../architecture.md) for actual evidence and deviations.
+
+The current pass adds **VUI forms and a visual module builder** to the Emacs
+frontend after hands-on review exposed incomplete discovery/typed editing. Verify the
+[complete interaction](emacs.md) on the existing review workspace before resuming
+joint recreation of actual EmptyNet modules and one machine. Preserve that
+workspace; do not reinitialize it. No live activation follows from frontend review.
 
 | Milestone | Deliverable | Exit gate |
 |---|---|---|

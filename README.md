@@ -1,147 +1,150 @@
 # Stringbed
 
-An extensible Racket environment for authoring Nix configurations. Add a package,
-configure a module, attach your own note, and see where each definition came from.
-Nix continues to evaluate modules and build systems. Stringbed edits the desired
-configuration; it does not install packages into the running system.
+A programmable Racket workbench for Nix configuration. Add packages, compose
+modules, attach your notes, and inspect authored intent alongside Nix's evaluated
+configuration. Nix retains its module, package and build semantics.
 
-**Status: first working authoring prototype (0.1).** CLI, a menu-based terminal
-editor and a native Racket GUI share one model and command API. Trusted extensions
-add forms, fields, validation and expansion without editing interface dispatch.
-This is not yet a production fleet manager or an EmptyNet migration.
+**0.4 development workbench:** VUI forms and a visual module builder join the
+Emacs discovery, typed editing, annotations and provenance flow. Reusable modules
+have data definitions and inspectable Racket source, backed by durable sessions
+and pinned Nix queries. Machine reconstruction is paused for frontend review.
+See [architecture.md](architecture.md) for contracts and limitations.
 
 ## Start
 
-Install Racket (including its GUI libraries). Nix is needed only for Nix operations.
-From this checkout:
+Open an existing workspace with the pinned terminal Emacs launcher:
 
 ```sh
-racket stringbed/main.rkt init my-home.sbd
-racket stringbed/main.rkt edit my-home.sbd '(meta user "alice")'
-racket stringbed/main.rkt edit my-home.sbd '(meta home-directory "/home/alice")'
-racket stringbed/main.rkt edit my-home.sbd '(add package "search")'
-racket stringbed/main.rkt edit my-home.sbd '(set "search" attribute "ripgrep")'
-racket stringbed/main.rkt edit my-home.sbd '(note "search" "Fast search for my research projects.")'
-racket stringbed/main.rkt edit my-home.sbd '(why "search")'
-racket stringbed/main.rkt tui my-home.sbd
-racket stringbed/main.rkt gui my-home.sbd
+nix run . -- edit /absolute/path/to/home.sbd
+# Equivalent launcher:
+nix run .#emacs -- /absolute/path/to/home.sbd
 ```
 
-CLI edits save immediately. GUI/TUI edits are drafts until Save; Undo restores
-previous draft states. Set the target system and state version to appropriate
-values before using the output. New workspaces default to a Linux Home Manager
-example, **not an automatically discovered account**. A macOS home needs, for
-example, `(meta system "aarch64-darwin")` and the appropriate `/Users/...` path.
+Press `a` to search packages, `o` for options, `?` for actions, `s` to save and
+`u` to undo. Catalogues have sortable columns; `RET` inspects a result and `a`
+adds the selected package. Option forms use typed controls and validate before
+changing the draft. See the [Emacs walkthrough](docs/emacs.md) for input locking,
+package integration, provenance and source navigation. Press `B` to open the
+[visual module builder](docs/module-builder.md).
 
-## Generate ordinary Nix
+For a **new** workspace, initialize once and set its metadata. Existing
+workspaces do not need initialization or automatic migration:
 
 ```sh
-racket stringbed/main.rkt edit my-home.sbd '(export "my-home-export")'
-racket stringbed/main.rkt lock my-home-export
-racket stringbed/main.rkt check my-home-export
-racket stringbed/main.rkt build my-home-export
+racket stringbed/main.rkt init home.sbd
+racket stringbed/main.rkt edit home.sbd '(meta user "alice")'
+racket stringbed/main.rkt edit home.sbd '(meta home-directory "/home/alice")'
+racket stringbed/main.rkt edit home.sbd '(add package "search" #hash((attribute . "ripgrep")))'
+racket stringbed/main.rkt edit home.sbd '(note "search" "Search my research projects.")'
+racket stringbed/main.rkt edit home.sbd
 ```
 
-Export creates a new directory (its parent must exist) with `configuration.nix`, `flake.nix` and authored
-`provenance.json`; it refuses to overwrite existing output. Inputs are selected in
-the workspace. `lock` fetches and pins them; check/build require that lock and do
-not update it. Commit/retain the exported lock. Nix flags are passed as argument
-arrays. `check` evaluates all systems without building; `build` builds `#default` without
-activation. This prototype intentionally exposes no switch/deploy command.
+CLI command edits save immediately. Interactive edits remain drafts until Save;
+undo survives reopening. Choose the actual platform, paths and state version before deployment.
+Defaults are example values, not detected machine facts. `nix run` packages the
+command; `nix develop` supplies Racket, Nix and Emacs with the frontend dependencies.
+The older `tui FILE` and `gui FILE` commands remain compatibility interfaces.
 
-The same export works with standard `nix flake check --no-build` and `nix build
-.#default` from the export directory. No Stringbed runtime is needed by the Nix
-module. The server example lacks hardware/boot configuration and is an authoring
-example, not a deployable system.
-
-## Extend the language
+## Export and inspect
 
 ```sh
-racket stringbed/main.rkt --extension extensions/web-service.rkt tui examples/server.sbd
-racket stringbed/main.rkt --extension extensions/web-service.rkt gui examples/server.sbd
+racket stringbed/main.rkt edit home.sbd '(export "export-1")'
+racket stringbed/main.rkt lock export-1
+racket stringbed/main.rkt search export-1 ripgrep
+racket stringbed/main.rkt options export-1 programs.git
+racket stringbed/main.rkt explain export-1 programs.git.enable
+racket stringbed/main.rkt check export-1
+racket stringbed/main.rkt build export-1
 ```
 
-Extension paths are relative to the workspace, not the shell's working directory.
-`examples/extensions/web-service.rkt` introduces a `web-service` form with port
-and document-root fields. The GUI and terminal editor discover those fields;
-expansion generates several Nix definitions. No new core parser or UI dispatch
-branch is needed. Extensions are explicitly loaded **trusted executable Racket**.
-They are not sandboxed and are not automatically loaded by workspace data.
+Exports are ordinary standalone flakes. Existing output directories are never
+overwritten. Reuse a prior lock with `(export "export-2" "export-1/flake.lock")`.
+Search tries exact package attributes first; broader search can be expensive.
+`check` evaluates without building; `build` never activates.
 
-For programmable composition, use the small library DSL in `stringbed/dsl.rkt`:
+| Shared command | Purpose |
+|---|---|
+| `(add package "id" #hash((attribute . "fd")))` | Explicit package creation; the Emacs catalogue also verifies the selection and generates IDs |
+| `(add option "id" #hash((path . "programs.git.enable") (value . #t)))` | Explicit low-level option creation; the Emacs frontend adds pinned Nix type validation |
+| `(add module "id")`, `(input fleet "path:/absolute/fleet-library")` | Import independent module providers |
+| `(note "id" "Reason")`, `(docs "id" ("URL"))` | Personal annotation and upstream links |
+| `(meta target nixos)` | Choose the system adapter |
+| `(home alice "/home/alice" "24.11")` | Declare an integrated Home Manager scope |
+| `(scope "id" "home:alice")` | Assign a node to that home |
+| `(why "id")`, `(nix)`, `(source)` | Authored provenance, Nix projection, editable data |
+| `(package-search "export-1" "ripgrep")` | Query the pinned package input |
+| `(option-search "export-1" "git" "home:alice")` | Discover scoped Nix option metadata |
+| `(evaluated-why "export-1" "programs.git.enable" "home:alice")` | Inspect effective Nix values |
+| `(remove "id")`, `(undo)`, `(save)` | Remove, restore, persist |
+
+Integrated homes and system nodes share one configuration but retain separate
+option namespaces. See [integrated example](examples/integrated.sbd).
+
+## Program and extend
 
 ```sh
 racket stringbed/main.rkt generate examples/programmatic.rkt generated.sbd
-racket stringbed/main.rkt tui generated.sbd
+racket stringbed/main.rkt --extension extensions/web-service.rkt gui examples/server.sbd
+racket stringbed/main.rkt pin home.sbd my-forms /absolute/portable-bundle main.rkt
+racket stringbed/main.rkt verify home.sbd
 ```
 
-The example uses a Racket loop and `compose` to generate a toolkit. Edit the Racket
-source to change the generator. Materialized workspace edits are independent;
-Stringbed does not claim to reverse arbitrary computations. The default vocabulary
-and interfaces are ordinary replaceable Racket modules, not a closed language.
+A bundle exports `forms`; use `stringbed/extension` for the shared API. Pinning
+captures every file in the declared directory, including helpers/resources. Keep
+`.stringbed` beside the workspace when moving it. Explicit development extensions
+and UI plugins (`--plugin`) are trusted Racket. Reload replaces their registry;
+failed reload leaves the current editor usable. Opening an editor loads pinned executable
+bundles, so only edit workspaces whose code you trust. `show FILE` reads workspace
+data without loading any extension or plugin. Generators may use arbitrary
+Racket; generated data records its source but does not invert the computation.
 See [extension API](docs/extensions.md).
 
-## Shared commands
+The [visual module builder](docs/module-builder.md) creates reusable forms from
+typed parameters, option assignments and compositions. Save an editable bundle,
+review its Racket/Nix preview, then explicitly pin it into the workspace.
+Hand-written extensions remain ordinary Racket; arbitrary source is not converted
+back into visual controls.
 
-| Command datum | Effect |
-|---|---|
-| `(list)`, `(kinds)` | Inspect nodes or available forms |
-| `(add package "id")` | Add a stable-ID node with defaults |
-| `(set "id" attribute "fd")` | Change a typed parameter |
-| `(note "id" "Reason")`, `(docs "id" ("URL"))` | Edit personal notes and references |
-| `(meta target nixos)` | Change target; extension-declared target constraints are checked |
-| `(input source "github:owner/repo/REV")` | Declare a flake input |
-| `(add module "id")` | Import a declared input's module; configure input and attribute fields |
-| `(remove "id")`, `(undo)` | Remove a node or undo a draft edit |
-| `(why "id")`, `(nix)`, `(source)` | Authored provenance, Nix projection or workspace data |
-| `(validate)`, `(save)`, `(export "new-dir")` | Validate, persist, or generate |
+Structured notes/docs are preserved by edits. Canonical saves normalize raw
+Racket comments/formatting; exact previous bytes are retained in
+`.stringbed/sources/<sha256>`. `migrate FILE` explicitly upgrades schema 1 with an
+exact `.v1.bak`; reading old workspaces does not silently migrate them.
 
-Workspace source can also be edited in the GUI, then applied as a validated
-transaction. Generated Nix is preview-only. Node notes survive data serialization;
-comments outside the workspace datum are not preserved by the serializer.
+## Lifecycle
 
-## Inspect a machine
+`inspect [USER@HOST]` reads host/kernel/current generation facts. `observe` reads
+adapter-specific generation state. An explicit plan binds saved source, locked
+export, built closure and expected target generation:
 
 ```sh
-racket stringbed/main.rkt inspect
-racket stringbed/main.rkt inspect alice@host
+racket stringbed/main.rkt --kind home --home-profile /absolute/hm-profile \
+  plan home.sbd export-1 plan.json
+racket stringbed/main.rkt status plan.json
+# Explicit operations on the target recorded in the plan:
+racket stringbed/main.rkt apply plan.json
+racket stringbed/main.rkt rollback plan.json
 ```
 
-Inspection reports hostname, kernel and NixOS current/booted system symlinks when
-present. SSH uses batch authentication and existing host-key policy. It does not
-reconstruct original configuration, collect secrets, or report a complete service
-inventory. No remote machine was contacted during development.
+For NixOS use `--kind nixos`; remote targets/builders are separate `--target
+USER@HOST` and `--builder USER@HOST` options before `plan`. Planning builds and
+observes; applying activates. Do not use example profiles on a real host. Unknown
+outcomes require observation and reconciliation, not blind retry. These adapters
+still require a disposable booted-system rehearsal before real fleet cutover.
 
-## Test
+## Reusable modules and next verification
 
-```sh
-raco test tests/core.rkt
-raco test tests/nix-integration.rkt
-xvfb-run -a racket tests/gui-smoke.rkt  # Linux; on desktop use racket directly
-bash tests/cli.sh
-```
+[packages/fleet-library](packages/fleet-library) is an independent, extraction-ready
+flake with opt-in shell/development, SSH, containers, remote desktop, EXWM,
+package-service and sops integrations. It has no dependency on Stringbed or
+EmptyNet. Machine identities and topology remain in consuming profiles; package
+implementations remain with their producers.
 
-Nix integration parses and evaluates generated expressions with fixture inputs.
-Real Home Manager and NixOS option evaluation were also verified locally; full
-closure builds remain a separate integration gate. See [validation](docs/validation.md) for actual evidence and limitations.
-The included flake also provides `nix run`, `nix develop` and core checks.
+- [Architecture and implementation reasoning](architecture.md)
+- [Validation evidence](docs/validation.md)
+- [Roadmap and complete EmptyNet migration plan](docs/roadmap.md)
+- [Capability ownership ledger](packages/fleet-library/MIGRATION.md)
 
-## Boundaries and next steps
-
-No fleet names, personal paths or credentials are built into Stringbed. Workspaces
-own deployment policy; external packages remain independently usable. Unknown
-forms remain readable but block compilation until the extension is provided.
-Save uses a cooperating-writer lock, detects external edits and atomically replaces
-the file; arbitrary noncooperating writers can still race after that comparison.
-
-Extension content/version pinning, custom widget hooks, full-screen TUI, evaluated
-option provenance, package/option discovery, generation manifests and deployment
-remain roadmap work. Workspaces are not yet complete reproducible deployment
-records: retain the tool/extension revisions and exported `flake.lock` together.
-
-- [Architecture and decisions](docs/architecture.md)
-- [Roadmap and EmptyNet migration gates](docs/roadmap.md)
-- [Session state](docs/state.md)
-
-NWM inspired the structure/source interaction; no NWM implementation was copied.
-Upstream documentation is linked from the design notes rather than reproduced.
+Run `bash tests/check.sh` for local automated tests (Racket, Nix, Emacs with
+Magit Section, VUI/Transient, Python 3 and Xvfb required).
+The full Nix fixture check is `bash tests/fleet-library.sh`.
+NWM inspired source/structure interaction; no implementation was copied.

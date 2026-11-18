@@ -46,6 +46,20 @@
   (check-equal? (hash-ref (node-by-id (session-workspace s) "search") 'note) "personal note")
   (execute! s r '(undo))
   (check-equal? (session-workspace s) w))
+(test-case "package and option creation require an explicit selection"
+  (define original (new-workspace "explicit-selection"))
+  (define s (session #f original '() #""))
+  (for ([command '((add package "git") (add option "search depth"))])
+    (check-exn exn:fail? (lambda () (execute! s r command)))
+    (check-equal? (session-workspace s) original)
+    (check-equal? (session-history s) '()))
+  (execute! s r '(add package "git" #hash((attribute . "git"))))
+  (execute! s r '(add option "search depth" #hash((path . "programs.fd.enable") (value . #t))))
+  (define generated (compile-module (session-workspace s) r))
+  (check-true (regexp-match? #rx"pkgs.git" generated))
+  (check-false (regexp-match? #rx"ripgrep|programs[.]git[.]enable" generated))
+  (check-equal? (hash-ref (hash-ref (node-by-id (session-workspace s) "search depth") 'params) 'path)
+                "programs.fd.enable"))
 (test-case "save round trip and external conflict"
   (define p (make-temporary-file))
   (dynamic-wind void

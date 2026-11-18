@@ -18,7 +18,25 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "vui": "vui"
+      }
+    },
+    "vui": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794838210,
+        "narHash": "sha256-VEtKQmlHAlUw6BRm76MatlZKGn0sj+fYevc3Ve1sG1s=",
+        "owner": "d12frosted",
+        "repo": "vui.el",
+        "rev": "004dd852746d8af838107dd7e3f44c5bbea04d79",
+        "type": "github"
+      },
+      "original": {
+        "owner": "d12frosted",
+        "repo": "vui.el",
+        "rev": "004dd852746d8af838107dd7e3f44c5bbea04d79",
+        "type": "github"
       }
     }
   },
