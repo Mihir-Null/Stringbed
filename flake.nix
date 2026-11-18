@@ -9,11 +9,15 @@
       default = pkgs.writeShellApplication {
         name = "stringbed";
         runtimeInputs = [ pkgs.racket pkgs.nix pkgs.openssh ];
-        text = ''exec racket ${self}/stringbed/main.rkt "$@"'';
+        text = ''
+          export PLTCOLLECTS="${self}:''${PLTCOLLECTS:-}"
+          exec racket ${self}/stringbed/main.rkt "$@"
+        '';
       };
     });
     devShells = eachSystem (pkgs: {
-      default = pkgs.mkShell { packages = [ pkgs.racket pkgs.nix pkgs.git ]; };
+      default = pkgs.mkShell { packages = [ pkgs.racket pkgs.nix pkgs.git pkgs.openssh ];
+        shellHook = ''export PLTCOLLECTS="$PWD:''${PLTCOLLECTS:-}"''; };
     });
     checks = eachSystem (pkgs: {
       core = pkgs.runCommand "stringbed-core-tests" { nativeBuildInputs = [ pkgs.racket ]; } ''
@@ -21,7 +25,9 @@
         cp -r ${self} source
         chmod -R u+w source
         cd source
-        raco test tests/core.rkt
+        for suite in core durability nix-query lifecycle ui-extension tui workbench; do
+          raco test "tests/$suite.rkt"
+        done
         touch "$out"
       '';
     });

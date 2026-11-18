@@ -2,11 +2,11 @@
 (require racket/class racket/list racket/port racket/string
          "model.rkt" "session.rkt"
          (only-in "extension.rkt" form-fields form-description field-name field-type field-default)
-         "compiler.rkt")
+         "compiler.rkt" "ui-extension.rkt")
 (provide create-editor run-gui)
 
 ;; The view owns widgets only. The session API owns semantic changes.
-(define (create-editor s r)
+(define (create-editor s r [p empty-plugin] [reload #f])
   (define frame (new frame% [label "Stringbed — configuration workspace"]
                      [width 1100] [height 760]))
   (define root (new vertical-panel% [parent frame] [alignment '(left top)]))
@@ -18,12 +18,16 @@
   (define right (new vertical-panel% [parent body] [alignment '(left top)]))
   (define selected #f)
   (define ids '())
-  (define (report text) (send status set-label text))
+  (define (report text) (send status set-label (format "~a" text)))
   (define (guard thunk)
     (with-handlers ([exn:fail? (lambda (e)
                                (report (exn-message e))
+                               (set-editor! output (string-append "Diagnostic\n" (exn-message e)))
                                (message-box "Stringbed" (exn-message e) frame '(ok stop)))])
       (thunk)))
+  (define search-field
+    (new text-field% [parent left] [label "Search nodes"]
+         [callback (lambda (_ event) (refresh!))]))
   (define node-list
     (new list-box% [parent left] [label "Configuration nodes"] [choices '()]
          [callback (lambda (widget event)
@@ -40,7 +44,7 @@
                             (define i (send kind-choice get-selection))
                             (unless i (error 'add "no extension forms are loaded"))
                             (define id (send id-field get-value))
-                            (define result (execute! s r (list 'add (list-ref kinds i) id)))
+                            (define result (dispatch-ui! s r p (list 'add (list-ref kinds i) id)))
                             (set! selected id)
                             (refresh!)
                             (report result))))])
@@ -59,8 +63,9 @@
   (define source (new text%))
   (new message% [parent source-panel]
        [label "Editable workspace data. Apply validates a single transaction; it does not execute Racket."])
-  (new editor-canvas% [parent source-panel] [editor source] [style '(auto-hscroll auto-vscroll)]
-       [min-height 200])
+  (define source-canvas
+    (new editor-canvas% [parent source-panel] [editor source] [style '(auto-hscroll auto-vscroll)]
+         [min-height 200]))
   (new button% [parent source-panel] [label "Apply workspace source"]
        [callback (lambda (_ event)
                    (guard (lambda ()
@@ -80,12 +85,12 @@
     (when (eq? editor output) (send editor lock #t)))
   (define (command! command)
     (guard (lambda ()
-             (define result (execute! s r command))
+             (define result (dispatch-ui! s r p command))
              (refresh!)
              (report result))))
   (define (display-command! command)
     (guard (lambda ()
-             (set-editor! output (execute! s r command))
+             (set-editor! output (format "~a" (dispatch-ui! s r p command)))
              (send tabs set-selection 0)
              (send source-panel show #f)
              (send output-panel show #t))))
@@ -99,7 +104,9 @@
       (cond
         [d
          (new message% [parent fields-panel] [label (form-description d)])
-         (for ([f (form-fields d)])
+         (define custom (hash-ref (plugin-gui-editors p) (hash-ref n 'kind) #f))
+         (when custom (custom fields-panel s r selected command!))
+         (for ([f (if custom '() (form-fields d))])
            (define row (new horizontal-panel% [parent fields-panel] [stretchable-height #f]))
            (define value (hash-ref (hash-ref n 'params) (field-name f) (field-default f)))
            (define plain? (memq (field-type f) '(string attribute)))
@@ -127,16 +134,30 @@
          (define actions (new horizontal-panel% [parent fields-panel] [stretchable-height #f]))
          (new button% [parent actions] [label "Why / expansion"]
               [callback (lambda (_ event) (display-command! (list 'why selected)))])
+         (new button% [parent actions] [label "Go to source"]
+              [callback (lambda (_ event)
+                          (send tabs set-selection 1)
+                          (send output-panel show #f)
+                          (send source-panel show #t)
+                          (define hit (regexp-match-positions (regexp (regexp-quote (format "~s" selected)))
+                                                              (send source get-text)))
+                          (when hit (send source set-position (caar hit) (cdar hit)))
+                          (send source-canvas focus))])
          (new button% [parent actions] [label "Remove node"]
-              [callback (lambda (_ event) (command! (list 'remove selected)))])]
+              [callback (lambda (_ event)
+                          (when (= 1 (message-box/custom "Remove node" (format "Remove ~a from this draft?" selected)
+                                                        "Remove" "Cancel" #f frame '(caution default=2)))
+                            (command! (list 'remove selected))
+                            (set-editor! output (draft-diff s))))])]
         [else
          (new message% [parent fields-panel]
               [label "Extension missing: node preserved. Load its extension to edit or compile."])
          (set-editor! output (format "~s" n))])))
   (define (refresh!)
     (define w (session-workspace s))
-    (set! ids (map (lambda (n) (hash-ref n 'id)) (hash-ref w 'nodes)))
-    (send node-list set (for/list ([n (hash-ref w 'nodes)])
+    (define nodes (matching-nodes w (send search-field get-value)))
+    (set! ids (map (lambda (n) (hash-ref n 'id)) nodes))
+    (send node-list set (for/list ([n nodes])
                          (format "~a · ~a" (hash-ref n 'id) (hash-ref n 'kind))))
     (unless (member selected ids) (set! selected (and (pair? ids) (car ids))))
     (when selected (send node-list set-selection (index-of ids selected)))
@@ -152,10 +173,34 @@
        [callback (lambda (_ event)
                    (define dir (get-text-from-user "Export" "New output directory (must not exist)" frame))
                    (when dir (command! (list 'export dir))))])
+  (new button% [parent toolbar] [label "Draft diff"]
+       [callback (lambda (_ event)
+                   (set-editor! output (draft-diff s))
+                   (send tabs set-selection 0)
+                   (send source-panel show #f)
+                   (send output-panel show #t))])
+  (when reload
+    (new button% [parent toolbar] [label "Reload extensions"]
+         [callback (lambda (_ event)
+                     (guard (lambda ()
+                              (define-values (next-r next-p) (reload))
+                              (set! r next-r) (set! p next-p)
+                              (set! kinds (sort (hash-keys r) symbol<?))
+                              (send kind-choice clear)
+                              (for ([kind kinds]) (send kind-choice append (symbol->string kind)))
+                              (refresh!) (report "Extensions reloaded."))))]))
+  (define command-field
+    (new text-field% [parent left] [label "Command (Racket data)"] [init-value "(validate)"]))
+  (new button% [parent left] [label "Run command"]
+       [callback (lambda (_ event)
+                   (guard (lambda ()
+                            (command! (call-with-input-string (send command-field get-value) read-data)))))])
+  (new message% [parent left]
+       [label (format "Plugin commands: ~a" (string-join (map symbol->string (sort (hash-keys (plugin-commands p)) symbol<?)) ", "))])
   (refresh!)
   frame)
 
-(define (run-gui s r)
-  (define frame (create-editor s r))
+(define (run-gui s r [p empty-plugin] [reload #f])
+  (define frame (create-editor s r p reload))
   (send frame show #t)
   (void))

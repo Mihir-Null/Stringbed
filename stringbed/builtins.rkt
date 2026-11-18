@@ -10,7 +10,7 @@
                              (list (nix-expr (string-append "pkgs." (hash-ref p 'attribute))))))))
    (form 'option "Define a Nix module option"
          (list (field 'path 'attribute "programs.git.enable" "Option path")
-               (field 'value 'value #t "String, boolean, integer or list of strings"))
+               (field 'value 'value #t "String, boolean, integer, list or attribute set"))
          (lambda (p w) (list (assignment (attr-path (hash-ref p 'path)) (hash-ref p 'value)))))
    (form 'module "Import a module from a named flake input"
          (list (field 'input 'attribute "home-manager" "Input name declared in workspace")

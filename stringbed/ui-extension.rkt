@@ -1,0 +1,80 @@
+#lang racket/base
+(require racket/list racket/string racket/port racket/pretty racket/path racket/runtime-path
+         "model.rkt" "session.rkt")
+(provide (struct-out plugin) empty-plugin merge-plugins load-ui-plugins dispatch-ui!
+         draft-diff matching-nodes)
+;; Trusted extensions use one semantic command boundary in every interface.
+;; GUI editor: (parent session registry node-id execute-callback) -> any
+;; TUI editor: (session registry node-id ask execute-callback) -> any
+;; Command: (session registry argument-list) -> printable result
+(struct plugin (commands gui-editors tui-editors) #:transparent)
+(define empty-plugin (plugin (hash) (hash) (hash)))
+(define reserved '(list kinds add set note docs remove meta input why source nix validate undo save export
+                       scope home package-search option-search evaluated-why))
+(define (merge-plugins plugins)
+  (define (merge-field accessor label)
+    (for/fold ([result (hash)]) ([p plugins])
+      (unless (plugin? p) (error 'plugin "expected ui-plugin export"))
+      (define entries (accessor p))
+      (unless (hash? entries) (error 'plugin "~a must be a hash" label))
+      (for/fold ([r result]) ([(key value) (in-hash entries)])
+        (unless (and (symbol? key) (procedure? value)) (error 'plugin "invalid ~a entry ~s" label key))
+        (unless (procedure-arity-includes? value (if (eq? label 'commands) 3 5))
+          (error 'plugin "~a handler ~a has wrong arity" label key))
+        (when (and (eq? label 'commands) (memq key reserved)) (error 'plugin "cannot shadow core command ~a" key))
+        (when (hash-has-key? r key) (error 'plugin "duplicate ~a entry ~a" label key))
+        (hash-set r key value))))
+  (plugin (merge-field plugin-commands 'commands)
+          (merge-field plugin-gui-editors 'gui-editors)
+          (merge-field plugin-tui-editors 'tui-editors)))
+(define-namespace-anchor anchor)
+(define-runtime-path ui-api "ui-extension.rkt")
+(define (load-ui-plugins paths [base (current-directory)] #:optional? [optional? #f])
+  (merge-plugins
+   (for/list ([p paths])
+     (define ns (make-base-namespace))
+     (namespace-attach-module (namespace-anchor->namespace anchor) ui-api ns)
+     (parameterize ([current-namespace ns]
+                    [current-library-collection-paths
+                     (cons (simplify-path (build-path (path-only ui-api) 'up))
+                           (current-library-collection-paths))])
+       (dynamic-require (simplify-path (path->complete-path p base)) 'ui-plugin
+                        (lambda () (if optional? empty-plugin (error 'plugin "module does not export ui-plugin: ~a" p))))))))
+(define (dispatch-ui! s registry p command)
+  (unless (and (list? command) (pair? command) (symbol? (car command)))
+    (error 'command "expected a command list"))
+  (define handler (hash-ref (plugin-commands p) (car command) #f))
+  (if handler (handler s registry (cdr command)) (execute! s registry command)))
+(define (matching-nodes workspace query)
+  (define needle (string-downcase query))
+  (filter (lambda (n)
+            (string-contains? (string-downcase
+                              (format "~a ~a ~s ~a" (hash-ref n 'id) (hash-ref n 'kind)
+                                      (hash-ref n 'params) (hash-ref n 'note))) needle))
+          (hash-ref workspace 'nodes)))
+(define (draft-diff s)
+  (define before (call-with-input-bytes (session-baseline s) read-data))
+  (define after (session-workspace s))
+  (define lines '())
+  (define (emit line) (set! lines (cons line lines)))
+  (define (fmt x) (pretty-format x #:mode 'write))
+  (for ([k (sort (remove-duplicates (append (hash-keys before) (hash-keys after)))
+                 string<? #:key symbol->string)] #:unless (eq? k 'nodes))
+    (define b (hash-ref before k '#:absent))
+    (define a (hash-ref after k '#:absent))
+    (unless (equal? a b) (emit (format "@@ ~a @@\n- ~a\n+ ~a" k (fmt b) (fmt a)))))
+  (define (index w) (for/hash ([n (hash-ref w 'nodes)]) (values (hash-ref n 'id) n)))
+  (define bs (index before)) (define as (index after))
+  (for ([id (sort (remove-duplicates (append (hash-keys bs) (hash-keys as))) string<?)])
+    (define b (hash-ref bs id #f)) (define a (hash-ref as id #f))
+    (cond [(not b) (emit (format "+ node ~a\n~a" id (fmt a)))]
+          [(not a) (emit (format "- node ~a\n~a" id (fmt b)))]
+          [(not (equal? a b))
+           (for ([k (sort (remove-duplicates (append (hash-keys b) (hash-keys a))) string<? #:key symbol->string)])
+             (define bv (hash-ref b k '#:absent)) (define av (hash-ref a k '#:absent))
+             (unless (equal? bv av) (emit (format "@@ node ~a / ~a @@\n- ~a\n+ ~a" id k (fmt bv) (fmt av)))))]))
+  (define before-order (map (lambda (n) (hash-ref n 'id)) (hash-ref before 'nodes)))
+  (define after-order (map (lambda (n) (hash-ref n 'id)) (hash-ref after 'nodes)))
+  (unless (equal? before-order after-order)
+    (emit (format "@@ node order @@\n- ~s\n+ ~s" before-order after-order)))
+  (if (null? lines) "No unsaved changes." (string-join (reverse lines) "\n")))

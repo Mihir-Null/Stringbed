@@ -1,17 +1,18 @@
 # Development state
 
-Mode: delegated implementation, based on the design agreed in chat.
-Current assignment: first authoring prototype, not fleet deployment.
+Current assignment: implementation through roadmap step 5, before the first
+joint EmptyNet reconstruction. Root `architecture.md` is the design authority.
 
-Accepted boundaries: Nix semantics remain upstream; Stringbed owns editing and
-operations; fleet-specific choices remain outside the tool. Default forms are
-extensible examples. Data workspaces and trusted executable extensions are separate.
+Implemented: schema migration/history/backups, extension snapshots/reload,
+Nix scopes/discovery/evaluated inspection, common CLI/TUI/GUI commands and UI
+plugins, explicit build/activation plans and recovery state, independent fleet
+capabilities and extraction ledger. See validation for evidence and remaining
+environmental gates; implementation is not fleet deployment approval.
 
-Next assignment: durable workspace and extension provenance/version locking,
-followed by full NixOS/Home Manager integration fixtures. The roadmap contains
-migration gates and per-target rollback requirements.
+Next: recreate selected real EmptyNet modules and one machine together, record
+friction/parity findings, iterate, then execute the remaining staged migration
+plan. No real machine configuration was replaced in this development pass.
 
-Open decisions: public project license; fleet-library repository name; extension
-package distribution and trust policy; desired custom UI plugin interface; remote
-protocol and source storage conventions. No credentials or private configuration files copied into this
-public prototype.
+Decisions remaining for that work: fleet-library repository name, public license,
+extension distribution/signing policy, complete machine backup conventions,
+Darwin execution and disposable NixOS activation rehearsal.

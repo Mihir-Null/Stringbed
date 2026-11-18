@@ -1,7 +1,16 @@
 # From prototype to EmptyNet migration
 
-The prototype proves editing and extension architecture. It is not a deployment
-cutover. Each milestone has an exit gate; no host should migrate on unit tests alone.
+The components through step 5 are implemented in the 0.2 workbench. This is not
+a deployment cutover. The original gates below remain acceptance criteria:
+source-span preservation, Darwin/full closure execution and booted-machine
+activation are not claimed complete. See [validation](validation.md) and the
+[architecture](../architecture.md) for actual evidence and deviations.
+
+The next pass is **joint recreation of actual EmptyNet modules and one machine**.
+First locate/edit a package, compose system/home modules, add annotations, inspect
+why, export/lock, and compare the resulting configuration with the original.
+Record usability and parity findings before expanding to all machines. No live
+activation follows implicitly from successful reconstruction.
 
 | Milestone | Deliverable | Exit gate |
 |---|---|---|

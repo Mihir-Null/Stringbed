@@ -1,11 +1,12 @@
 #lang racket/base
 (require racket/list racket/string)
 (provide (struct-out field) (struct-out form) (struct-out assignment)
-         (struct-out nix-expr) (struct-out nix-import) make-registry validate-node defaults attr-path)
+         (struct-out nix-expr) (struct-out nix-path) (struct-out nix-import) make-registry validate-node defaults attr-path)
 (struct field (name type default description) #:transparent)
 (struct form (kind description fields expand) #:transparent)
 (struct assignment (path value) #:transparent)
 (struct nix-expr (text) #:transparent)
+(struct nix-path (value) #:transparent)
 (struct nix-import (expression) #:transparent)
 (define (attr-path s)
   (unless (and (string? s) (regexp-match? #px"^[A-Za-z_][A-Za-z0-9_-]*(\\.[A-Za-z_][A-Za-z0-9_-]*)*$" s))
@@ -18,6 +19,13 @@
     (hash-set r (form-kind d) d)))
 (define (defaults d)
   (for/hash ([f (form-fields d)]) (values (field-name f) (field-default f))))
+;; Recursive data values preserve native Nix lists/attribute sets. Executable Nix
+;; expressions remain an explicit trusted-extension capability.
+(define (option-value? v)
+  (or (string? v) (boolean? v) (exact-integer? v)
+      (and (list? v) (andmap option-value? v))
+      (and (hash? v) (for/and ([(k x) (in-hash v)])
+                       (and (or (symbol? k) (string? k)) (option-value? x))))))
 (define (validate-node n registry)
   (define d (hash-ref registry (hash-ref n 'kind) (lambda () (error 'extension "missing kind ~a" (hash-ref n 'kind)))))
   (define params (hash-ref n 'params))
@@ -29,7 +37,7 @@
               [(string) (string? v)] [(boolean) (boolean? v)]
               [(integer) (exact-integer? v)] [(port) (and (exact-integer? v) (<= 1 v 65535))]
               [(attribute) (and (string? v) (with-handlers ([exn:fail? (lambda (_) #f)]) (attr-path v) #t))]
-              [(value) (or (string? v) (boolean? v) (exact-integer? v) (and (list? v) (andmap string? v)))]
+              [(value) (option-value? v)]
               [else (error 'field "unknown field type ~a" (field-type f))])
       (error 'parameter "~a: expected ~a, got ~s" (field-name f) (field-type f) v)))
   d)
