@@ -23,3 +23,21 @@
    (check-true (parameterize ([current-output-port output]) (system* nix "--eval" "--json" "--expr" escaped)))
    (check-true (regexp-match? #rx"literal" (get-output-string output))))
  (lambda () (delete-directory/files dir)))
+(test-case "native null and scientific finite numbers parse in Nix"
+  (define numbers (nix-value (list 'null 1e20 1e-20 -1e20 -1e-20 1.25 -2 -1.25 -0.0)))
+  (define output (open-output-string))
+  (check-true (parameterize ([current-output-port output])
+                (system* nix "--eval" "--strict" "--json" "--expr" numbers)))
+  (check-true (regexp-match? #rx"null" (get-output-string output))))
+(test-case "digit-leading package and module attributes use safe quoted references"
+  (define w (new-workspace "numeric"))
+  (define r (load-registry))
+  (define s (session #f w '() #""))
+  (execute! s r '(add package "game" #hash((attribute . "0ad"))))
+  (execute! s r '(add module "numeric-module" #hash((input . "home-manager") (attribute . "nixosModules.0test"))))
+  (define module (compile-module (session-workspace s) r))
+  (define expression
+    (string-append "let m = (" module ") { pkgs.\"0ad\" = \"game-fixture\"; inputs.home-manager.nixosModules.\"0test\" = {}; lib = {}; }; in m.imports"))
+  (define output (open-output-string))
+  (check-true (parameterize ([current-output-port output]) (system* nix "--eval" "--strict" "--json" "--expr" expression)))
+  (check-true (regexp-match? #rx"game-fixture" (get-output-string output))))

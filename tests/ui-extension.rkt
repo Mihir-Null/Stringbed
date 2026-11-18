@@ -9,7 +9,7 @@
    (call-with-output-file path (lambda (o) (write (new-workspace "ui-test") o)))
    (define s (open-session path)) (define r (load-registry))
    (check-equal? (draft-diff s) "No unsaved changes.")
-   (define p (plugin (hash 'search-package (lambda (s r args) (execute! s r (list 'add 'package (car args))))) (hash) (hash)))
+   (define p (plugin (hash 'search-package (lambda (s r args) (execute! s r (list 'add 'package (car args) (hash 'attribute "ripgrep"))))) (hash) (hash)))
    (dispatch-ui! s r p '(search-package "finder"))
    (check-equal? (length (matching-nodes (session-workspace s) "RIPGREP")) 1)
    (check-true (regexp-match? #rx"[+] node finder" (draft-diff s)))

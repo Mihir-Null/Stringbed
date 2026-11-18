@@ -10,7 +10,7 @@
    (call-with-output-file path (lambda (o) (write (new-workspace "gui-demo") o)))
    (define s (open-session path))
    (define r (load-registry))
-   (execute! s r '(add package "search"))
+   (execute! s r '(add package "search" #hash((attribute . "ripgrep"))))
    (define p (plugin (hash 'annotate (lambda (s r args) (execute! s r '(note "search" "plugin command")))) (hash) (hash)))
    (define frame (create-editor s r p))
    (check-true (is-a? frame frame%))

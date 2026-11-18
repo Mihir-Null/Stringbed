@@ -2,10 +2,11 @@
 
 ## Scope of this development pass
 
-Implement roadmap steps 1–5 before the first user-led EmptyNet reconstruction.
-The user will recreate shared modules and a machine with Stringbed as the first
-joint verification pass. Automated verification uses generic isolated consumers;
-no live fleet activation, migration or deletion is part of this development pass.
+The current checkpoint replaces the default editing interface with an Emacs
+workbench. The first hands-on review found that package IDs disguised unrelated
+defaults, option editing lacked semantic checks, and provenance was unreadable.
+Machine reconstruction is paused until the discovery/edit/inspect/save flow is
+usable. No live fleet activation, migration or deletion is part of this pass.
 
 The product is a programmable environment for authoring and operating Nix
 configuration. Its default vocabulary is extensible Racket, not a closed schema
@@ -138,6 +139,53 @@ with the pinned input's API.
 
 ### Interfaces and programmatic commands
 
+#### Emacs checkpoint decisions
+
+The visible concepts are a workspace, its system/home scopes, selected packages
+and module options, personal annotations, and authored versus evaluated results.
+Stable internal IDs identify entries; display names and package attributes do not
+replace those IDs. Existing IDs and extension references must survive opening and
+saving. Selecting a package must add that package; selecting an option must supply
+a value checked against the selected scope's pinned Nix option type.
+
+| Decision | Reason | Alternative |
+|---|---|---|
+| Ordinary Emacs package plus pinned terminal launcher | Reuse the user's editor or launch a predictable standalone interface | Separate new terminal and graphical implementations would duplicate interaction behavior |
+| `magit-section` trees, native widgets, `tabulated-list-mode`, `transient` | Each view has one rendering/focus owner; tables and forms use mature Emacs controls | VUI remains a candidate for reactive forms; combining VUI and tui.el adds overlapping state/focus ownership |
+| Versioned UTF-8 JSON Lines | Both runtimes have data parsers; booleans, null, arrays and objects have an explicit shared vocabulary | Native s-expression readers differ in booleans, hash syntax and executable reader extensions |
+| Racket session is the edit authority | Existing validation, undo and atomic persistence remain shared | A second Elisp configuration model would drift |
+| Immutable query snapshots and exact lock reuse | Background results can identify their source and pin; edits cannot silently update inputs | Ambient nixpkgs channels or mutable export directories hide revision changes |
+| Explicit initial input locking | The user can see when moving input references are resolved | Automatic locking during a package search obscures reproducibility |
+
+`protocol.rkt` maps structured requests to Racket operations. Session tokens and
+revisions bind every edit; delayed query results retain the revision they queried.
+The client discards stale presentation results. Work runs off the Emacs command
+loop with request correlation, status and cancellation. Cancellation is best
+effort and must not claim to undo a completed edit. See the
+[wire contract](docs/emacs-protocol.md).
+
+`query-context.rkt` owns disposable, source-bound exports and metadata caches.
+The workspace's authored inputs and accepted lock identify query semantics.
+Package metadata, Nix module options and application-specific flags remain
+distinct. Option controls are derived from upstream metadata; complex/dynamic
+types retain an advanced value editor and Nix remains the semantic validator.
+Package metadata is the pinned upstream `legacyPackages` set for the target
+system; scope-specific overlays and nixpkgs configuration are not projected into
+that catalogue yet. Option metadata is evaluated in the selected module scope.
+
+The frontend exposes export, evaluation and build, with no activation operation.
+Trusted Racket still executes when loading forms; a data-only route remains
+available. Immutable pinned bundles are inspected at their recorded source;
+derivative editing and repinning must be explicit. A language browser can show
+parameters and expansion without claiming to invert arbitrary Racket programs.
+
+Verification proceeds through protocol and query contracts, typed forms and
+stale responses, preservation/reopen/undo, then an actual terminal Emacs session.
+The standalone launcher and package integration are separate checks. A green
+batch Elisp load is not evidence that focus, navigation or interaction works.
+
+#### Shared and legacy interfaces
+
 `session.rkt` is the editing command boundary. Each edit computes a candidate,
 validates/expands it, and commits only on success. Stable IDs connect parameters,
 notes, docs, source and provenance. `main.rkt` exposes those commands to scripts;
@@ -233,8 +281,9 @@ event bus, agent runtime or credential broker into the editor. The capability
 ledger assigns every reviewed EmptyNet area to tool, library, producer, machine
 policy or retained procedure, including areas not reimplemented in this pass.
 
-The next user-led pass is to recreate actual modules and one machine, evaluate
-parity and test everyday editing. It may change this example DSL. Full fleet
+The next user-led pass is to review the Emacs interaction on the preserved
+workspace, then recreate actual modules and one machine and evaluate parity.
+That review may change this example DSL. Full fleet
 shadowing, activation and retirement follow the gates in `docs/roadmap.md`.
 No existing host's source or running configuration is changed by these fixtures.
 
@@ -256,6 +305,11 @@ provenance limitation are exposed behaviors to assess in the joint pass.
 ## Upstream references
 
 - [Racket namespaces and module instances](https://docs.racket-lang.org/guide/mk-namespace.html)
+- [Racket JSON data representation](https://docs.racket-lang.org/json/)
+- [Magit Section as an independent package](https://docs.magit.vc/devel/magit-section/)
+- [Emacs native widget programming](https://www.gnu.org/software/emacs/manual/html_node/widget/Programming-Example.html)
+- [Terminal mouse support](https://www.gnu.org/software/emacs/manual/html_node/emacs/Text_002dOnly-Mouse.html)
+- [VUI](https://github.com/d12frosted/vui.el) — deferred reactive-form experiment
 - [Racket GUI](https://docs.racket-lang.org/gui/)
 - [Nix manual](https://nix.dev/manual/nix/latest/)
 - [NixOS manual: modules](https://nixos.org/manual/nixos/stable/#sec-writing-modules)

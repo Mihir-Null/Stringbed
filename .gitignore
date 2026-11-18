@@ -3,3 +3,5 @@ result
 result-*
 .stringbed/
 *.sbd.lock/
+*.elc
+__pycache__/

@@ -1,7 +1,54 @@
 # Workbench validation
 
+## Emacs checkpoint
+
+The 0.3 pass adds an ordinary Emacs package and pinned terminal launcher. The
+terminal test uses actual keyboard input and the real Racket backend, with an
+explicit synthetic Nix executable for deterministic catalogue/type replies.
+Real Nix semantics are checked separately; fixture replies are not evidence of
+upstream package builds or machine activation.
+
+| Verification | Evidence |
+|---|---|
+| Legacy preservation | Core, durability, existing queries, lifecycle, UI hooks, TUI and workbench suites; CLI/menu, real ANSI terminal restoration and native GUI interaction passed |
+| Protocol | 12 cases: session/revision checks, auto IDs and actual package selection, typed rejection, JSON values, annotations/save/reopen/undo, old API locks, data-only unknown forms, sibling-sensitive expansion, stale queries/commits, cancellation races, lock cleanup and scoped package-collection provenance |
+| Query contexts | 8 cases: explicit first pin, exact lock reuse, unchanged-input lock seeding, package cache reuse, tamper detection, field errors, safe evaluation/build dispatch and cancelled/concurrent preparation cleanup |
+| Emacs | 18 ERT cases: JSON shape preservation, stale catalogue/forms, typed controls, legacy invalid values, field errors/keymaps, source protection, unsaved draft guards, actual before/after changes, multi-scope completion and real backend persistence |
+| Terminal Emacs | Description search, package metadata and selection, Boolean option control, folding and widget focus, note/save, readable provenance, selected Nix, reopen/undo, exact original backup and terminal restoration |
+| Native Nix types | Pinned Boolean, enum, integer, number, nullable, list and attribute-set controls; invalid scalar/nested values and unknown options rejected; throwing defaults remain inspectable |
+| Native package/source | Exact ripgrep 15.2.0 lookup returned homepage and an existing absolute Nix source location |
+| Native NixOS scope | `services.openssh.enable` discovered as Boolean and rejected value `5`; `networking.hostName` returned effective value and definition locations |
+| Integrated Home Manager | `home:demo` option discovery and effective `programs.git.enable = true` passed; incomplete definition origins remain explicitly labelled |
+| Packaging | An earlier checkpoint snapshot's pinned launcher built; packaged Emacs loaded Stringbed, Magit Section and Transient under `--quick`. Final source package build is a CI gate as described below |
+
+The preceding PR revision's GitHub workflow failed because apt-installed Nix
+could not access its daemon socket. CI now installs Nix explicitly and runs the
+interface checks in `nix develop`, so Emacs package availability under `--quick`
+does not depend on distribution site initialization. Remote CI results are
+reported on the PR separately from these local checks.
+
+The local execution environment lost parts of `/nix/store` after the successful
+launcher build. A bounded repair did not recover the full closure. The final
+source passed the tests above, but its exact packaged rebuild remains a remote
+CI gate; an earlier snapshot's build is not labelled as that final rebuild.
+
+```sh
+nix develop --command bash tests/check.sh
+bash tests/real-nix.sh  # scoped evaluation plus native query-type fixture
+nix build .#emacs      # pinned standalone terminal launcher
+```
+
+Broad package searching evaluates upstream nixpkgs and can remain expensive;
+the UI exposes progress, cancellation and exact lookup. Scope-specific overlays
+are not represented in the upstream package catalogue. VUI focus experiments,
+a visual module-definition builder and machine activation remain separate gates.
+
+## Prior fleet-library baseline
+
 Validated on Linux with Racket 8.16 and Nix 2.26.3. These are executed local
-checks; GitHub CI is a separate result attached to the pull request.
+checks from the previous workbench milestone; GitHub CI is a separate result
+attached to the pull request. They are not claims of fresh full closure builds
+for the Emacs pass.
 
 | Verification | Evidence |
 |---|---|

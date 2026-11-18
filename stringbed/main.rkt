@@ -1,10 +1,12 @@
 #lang racket/base
-(require racket/cmdline racket/file racket/path racket/port racket/pretty racket/runtime-path
+(require racket/cmdline racket/file racket/path racket/port racket/pretty racket/runtime-path racket/system
          "model.rkt" "session.rkt" "operations.rkt" "durability.rkt" "lifecycle.rkt"
          "ui-extension.rkt" "nix-query.rkt")
 (provide main)
 (define-runtime-path tui-module "tui.rkt")
 (define-runtime-path gui-module "gui.rkt")
+(define-runtime-path protocol-module "protocol.rkt")
+(define-runtime-path emacs-launcher "../scripts/stringbed-emacs")
 (define (main)
   (define extensions '()) (define plugins '())
   (define target #f) (define builder #f) (define kind 'nixos) (define profile #f)
@@ -21,6 +23,17 @@
       #:args args args))
   (with-handlers ([exn:fail? (lambda (e) (eprintf "stringbed: ~a\n" (exn-message e)) (exit 1))])
     (cond
+      [(equal? args '("serve"))
+       (unless (and (null? extensions) (null? plugins))
+         (error 'serve "pin trusted extensions in the workspace before opening the Emacs frontend"))
+       ((dynamic-require protocol-module 'run-server))]
+      [(and (= (length args) 2) (member (car args) '("edit" "emacs")))
+       (unless (and (null? extensions) (null? plugins))
+         (error 'edit "pin trusted extensions in the workspace before opening the Emacs frontend"))
+       (define launcher
+         (or (getenv "STRINGBED_EMACS_LAUNCHER")
+             (find-executable-path "stringbed-emacs") emacs-launcher))
+       (exit (system*/exit-code launcher (path->complete-path (cadr args))))]
       [(and (= (length args) 3) (equal? (car args) "generate"))
        (define source (path->complete-path (cadr args)))
        (define w (attach-generator-provenance (workspace-valid! (dynamic-require source 'configuration)) source))
@@ -86,8 +99,9 @@ Stringbed — editable Nix configuration
   secret-metadata ENCRYPTED-SOPS-FILE
   generate TRUSTED-RACKET-MODULE FILE
   pin FILE ID BUNDLE-DIR ENTRY | verify FILE
-  edit FILE '(add package "search")'
-  edit FILE '(set "search" attribute "ripgrep")'
+  edit FILE | emacs FILE         Open the Emacs workbench
+  serve                         Structured frontend protocol on stdin/stdout
+  edit FILE '(add package "search" #hash((attribute . "ripgrep")))'
   edit FILE '(home alice "/home/alice" "24.11")'
   edit FILE '(scope "search" "home:alice")'
   tui FILE | gui FILE

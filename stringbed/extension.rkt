@@ -1,5 +1,5 @@
 #lang racket/base
-(require racket/list racket/string)
+(require racket/list racket/string racket/math)
 (provide (struct-out field) (struct-out form) (struct-out assignment)
          (struct-out nix-expr) (struct-out nix-path) (struct-out nix-import) make-registry validate-node defaults attr-path)
 (struct field (name type default description) #:transparent)
@@ -9,7 +9,7 @@
 (struct nix-path (value) #:transparent)
 (struct nix-import (expression) #:transparent)
 (define (attr-path s)
-  (unless (and (string? s) (regexp-match? #px"^[A-Za-z_][A-Za-z0-9_-]*(\\.[A-Za-z_][A-Za-z0-9_-]*)*$" s))
+  (unless (and (string? s) (regexp-match? #px"^[A-Za-z0-9_][A-Za-z0-9_-]*(\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*$" s))
     (error 'attribute "invalid attribute path: ~s" s))
   (string-split s "."))
 (define (make-registry descriptors)
@@ -22,7 +22,9 @@
 ;; Recursive data values preserve native Nix lists/attribute sets. Executable Nix
 ;; expressions remain an explicit trusted-extension capability.
 (define (option-value? v)
-  (or (string? v) (boolean? v) (exact-integer? v)
+  (or (eq? v 'null) (string? v) (boolean? v)
+      (and (real? v) (not (nan? v)) (not (infinite? v))
+           (or (exact-integer? v) (inexact? v)))
       (and (list? v) (andmap option-value? v))
       (and (hash? v) (for/and ([(k x) (in-hash v)])
                        (and (or (symbol? k) (string? k)) (option-value? x))))))

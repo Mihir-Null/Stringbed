@@ -1,7 +1,7 @@
 #lang racket/base
-(require racket/list racket/string racket/file racket/format racket/path json "extension.rkt" "model.rkt")
+(require racket/list racket/string racket/math racket/file racket/format racket/path json "extension.rkt" "model.rkt")
 (provide nix-value nix-string (struct-out nix-path) compile-module compile-flake provenance
-         validate-workspace export-workspace node-scope workspace-homes)
+         validate-workspace validate-workspace-node export-workspace node-scope workspace-homes)
 ;; Paths are explicit values supplied by trusted extensions, never guessed from strings.
 (define (nix-string s)
   (string-append "\"" (string-replace (string-replace (string-replace (string-replace (string-replace s "\\" "\\\\") "\"" "\\\"") "${" "\\${") "\n" "\\n") "\r" "\\r") "\""))
@@ -12,7 +12,13 @@
            (error 'nix-path "explicit path must be absolute; use a flake input for portable modules"))
          (format "(builtins.toPath ~a)" (nix-string (nix-path-value v)))]
         [(string? v) (nix-string v)] [(boolean? v) (if v "true" "false")]
-        [(exact-integer? v) (number->string v)]
+        [(eq? v 'null) "null"]
+        [(and (real? v) (not (nan? v)) (not (infinite? v))
+              (or (exact-integer? v) (inexact? v)))
+         ;; Nix requires a decimal mantissa for exponents and parentheses
+         ;; around unary negation when the value appears in a list.
+         (define text (regexp-replace #px"^(-?[0-9]+)([eE])" (number->string v) "\\1.0\\2"))
+         (if (string-prefix? text "-") (string-append "(" text ")") text)]
         [(list? v) (format "[ ~a ]" (string-join (map nix-value v) " "))]
         [(hash? v)
          (format "{ ~a }" (string-join
@@ -51,16 +57,24 @@
         (hash-set* w 'target 'home 'user user 'home-directory (hash-ref meta 'home-directory)
                    'state-version (hash-ref meta 'state-version) 'homes (hash)))
       w))
+(define (expand-node w r n)
+  (define scope (node-scope w n))
+  (define d (validate-node n r))
+  (define result ((form-expand d) (hash-ref n 'params) (scope-context w scope)))
+  (unless (and (list? result) (andmap (lambda (v) (or (assignment? v) (nix-import? v))) result))
+    (error 'extension "~a returned invalid expansion" (form-kind d)))
+  (cons n result))
+(define (validate-workspace-node w r n)
+  ;; Keep the complete workspace available to programmable forms.
+  (expand-node w r n) (void))
 (define (expanded w r)
   (workspace-valid! w)
   (workspace-homes w)
-  (for/list ([n (hash-ref w 'nodes)])
-    (define scope (node-scope w n))
-    (define d (validate-node n r))
-    (define result ((form-expand d) (hash-ref n 'params) (scope-context w scope)))
-    (unless (and (list? result) (andmap (lambda (v) (or (assignment? v) (nix-import? v))) result))
-      (error 'extension "~a returned invalid expansion" (form-kind d)))
-    (cons n result)))
+  (for/list ([n (hash-ref w 'nodes)]) (expand-node w r n)))
+(define (selected-entries w r id)
+  (when id (node-by-id w id))
+  (define entries (expanded w r))
+  (if id (filter (lambda (entry) (equal? (hash-ref (car entry) 'id) id)) entries) entries))
 (define (validate-workspace w r) (expanded w r) (void))
 (define (definition-text v)
   (cond [(nix-import? v) (format "imports = [ ~a ];" (nix-import-expression v))]
@@ -68,8 +82,8 @@
          (unless (and (pair? (assignment-path v)) (andmap string? (assignment-path v)))
            (error 'assignment "option paths must be nonempty lists of literal strings"))
          (format "~a = ~a;" (string-join (map nix-string (assignment-path v)) ".") (nix-value (assignment-value v)))]))
-(define (compile-module w r #:scope [scope #f])
-  (render-module w (expanded w r) (or scope (if (eq? (hash-ref w 'target) 'home) "home" "system"))))
+(define (compile-module w r #:scope [scope #f] #:node [id #f])
+  (render-module w (selected-entries w r id) (or scope (if (eq? (hash-ref w 'target) 'home) "home" "system"))))
 (define (origin w n) (string-append "stringbed:" (hash-ref w 'name) "/" (hash-ref n 'id)))
 (define (render-module w entries scope)
   (string-append
@@ -115,7 +129,7 @@
    (format "    ~a.${~a} = target;\n" (if home? "homeConfigurations" "nixosConfigurations") name)
    (format "    packages.${~a}.default = target.~a;\n" system (if home? "activationPackage" "config.system.build.toplevel"))
    "  };\n}\n"))
-(define (provenance w r) (render-provenance w (expanded w r)))
+(define (provenance w r #:node [id #f]) (render-provenance w (selected-entries w r id)))
 (define (render-provenance w entries)
   (for/list ([entry entries])
     (define n (car entry))

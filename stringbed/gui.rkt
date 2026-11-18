@@ -38,16 +38,28 @@
   (define kind-choice (new choice% [parent left] [label "Form"]
                            [choices (map symbol->string kinds)]))
   (define id-field (new text-field% [parent left] [label "New stable ID"] [init-value "new-node"]))
+  (define (creation-command kind id)
+    (case kind
+      [(package)
+       (define attribute (get-text-from-user "Select package" "Actual nixpkgs attribute" frame))
+       (and attribute (list 'add kind id (hash 'attribute attribute)))]
+      [(option)
+       (define path (get-text-from-user "Select option" "Actual Nix option path" frame))
+       (define value (and path (get-text-from-user "Set option" "Value as Racket data (e.g. #t or a quoted string)" frame)))
+       (and value (list 'add kind id (hash 'path path 'value (call-with-input-string value read-data))))]
+      [else (list 'add kind id)]))
   (new button% [parent left] [label "Add node"]
        [callback (lambda (_ event)
                    (guard (lambda ()
                             (define i (send kind-choice get-selection))
                             (unless i (error 'add "no extension forms are loaded"))
                             (define id (send id-field get-value))
-                            (define result (dispatch-ui! s r p (list 'add (list-ref kinds i) id)))
-                            (set! selected id)
-                            (refresh!)
-                            (report result))))])
+                            (define command (creation-command (list-ref kinds i) id))
+                            (when command
+                              (define result (dispatch-ui! s r p command))
+                              (set! selected id)
+                              (refresh!)
+                              (report result)))))])
   (define fields-panel (new vertical-panel% [parent right] [alignment '(left top)]
                             [stretchable-height #f]))
   (define tabs (new tab-panel% [parent right] [choices '("Nix / provenance" "Workspace source")]

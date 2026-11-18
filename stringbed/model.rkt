@@ -48,6 +48,8 @@
                  (hash? (hash-ref n 'params #f)) (string? (hash-ref n 'note #f))
                  (list? (hash-ref n 'docs #f)) (andmap string? (hash-ref n 'docs)))
       (error 'workspace "malformed node"))
+    (when (hash-has-key? n 'display-name)
+      (unless (string? (hash-ref n 'display-name)) (error 'workspace "display-name must be a string")))
     (when (hash-has-key? n 'scope)
       (define scope (hash-ref n 'scope))
       (unless (and (string? scope) (or (member scope '("system" "home"))

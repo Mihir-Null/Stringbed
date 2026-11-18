@@ -6,11 +6,11 @@ source-span preservation, Darwin/full closure execution and booted-machine
 activation are not claimed complete. See [validation](validation.md) and the
 [architecture](../architecture.md) for actual evidence and deviations.
 
-The next pass is **joint recreation of actual EmptyNet modules and one machine**.
-First locate/edit a package, compose system/home modules, add annotations, inspect
-why, export/lock, and compare the resulting configuration with the original.
-Record usability and parity findings before expanding to all machines. No live
-activation follows implicitly from successful reconstruction.
+The current pass is the **Emacs frontend checkpoint** after hands-on review
+exposed ambiguous defaults and incomplete discovery/typed editing. Verify the
+[complete interaction](emacs.md) on the existing review workspace before resuming
+joint recreation of actual EmptyNet modules and one machine. Preserve that
+workspace; do not reinitialize it. No live activation follows from frontend review.
 
 | Milestone | Deliverable | Exit gate |
 |---|---|---|

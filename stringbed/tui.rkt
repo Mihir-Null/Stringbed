@@ -7,6 +7,16 @@
   (display text) (display ": ") (flush-output)
   (define answer (read-line))
   (when (eof-object? answer) (error 'input "end of input")) answer)
+(define (create-node kind id ask execute)
+  ;; Built-in selections must be explicit before the node enters the draft.
+  ;; Catalogue discovery and typed controls are provided by the Emacs frontend.
+  (define params
+    (case kind
+      [(package) (hash 'attribute (ask "Package attribute (for example, fd)"))]
+      [(option) (hash 'path (ask "Nix option path")
+                      'value (datum (ask "Option value (Racket data, e.g. #t or a quoted string)")))]
+      [else #f]))
+  (execute (if params (list 'add kind id params) (list 'add kind id))))
 (define (configure s r p id ask execute)
   (define n (node-by-id (session-workspace s) id))
   (define custom (hash-ref (plugin-tui-editors p) (hash-ref n 'kind) #f))
@@ -27,14 +37,14 @@
       (set! r next-r) (set! p next-p))
     (case (string->number line)
       [(1) (execute '(list))]
-      [(2) (displayln (execute '(kinds))) (execute (list 'add (string->symbol (prompt "Form kind")) (prompt "Stable ID")))]
+      [(2) (displayln (execute '(kinds))) (create-node (string->symbol (prompt "Form kind")) (prompt "Stable ID") prompt execute)]
       [(3) (configure s r p (prompt "Node ID") prompt execute)]
       [(4) (execute (list 'note (prompt "Node ID") (prompt "Note")))]
       [(5) (execute (list 'why (prompt "Node ID")))]
       [(6) (execute '(undo))] [(7) (execute '(save))] [(8) (execute (list 'export (prompt "New output directory")))]
       [(9) (execute '(nix))] [(0) (execute (list 'remove (prompt "Node ID")))]
       [else (if (equal? line "diff") (draft-diff s) (if (equal? line "reload") "Extensions reloaded." (execute (datum line))))]))
-  (displayln "Stringbed terminal editor — changes are drafts until saved. Commands and plugin commands are accepted as s-expressions.")
+  (displayln "Stringbed legacy terminal editor — changes are drafts until saved. Use stringbed edit FILE for the Emacs workbench. Commands and plugin commands are accepted as s-expressions.")
   (let loop ()
     (displayln (describe-workspace (session-workspace s)))
     (displayln "1 List  2 Add  3 Configure  4 Note  5 Why  6 Undo  7 Save  8 Export  9 Nix  0 Remove  diff  q Quit")
@@ -119,7 +129,7 @@
                       (define-values (next-r next-p) (reload))
                       (set! r next-r) (set! p next-p) (set! status "Extensions reloaded.")]
              [(#\/) (set! query (ask "Search nodes")) (set! selected 0)]
-             [(#\a) (set! status (execute (list 'add (string->symbol (ask (string-append "Kind (" (string-join (map symbol->string (sort (hash-keys r) symbol<?)) ", ") ")"))) (ask "Stable ID"))))]
+             [(#\a) (set! status (create-node (string->symbol (ask (string-append "Kind (" (string-join (map symbol->string (sort (hash-keys r) symbol<?)) ", ") ")"))) (ask "Stable ID") ask execute))]
              [(#\e) (set! status (format "~a" (configure s r p (id) ask execute)))]
              [(#\n) (set! status (execute (list 'note (id) (ask "Your note"))))]
              [(#\x) (when (equal? (ask (format "Remove ~a? Type yes" (id))) "yes") (set! status (execute (list 'remove (id)))))]

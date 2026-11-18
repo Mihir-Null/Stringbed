@@ -14,3 +14,4 @@ racket -e '(require "stringbed/model.rkt" "stringbed/compiler.rkt" "stringbed/se
 # Extra unrelated lock nodes are harmless; normalize root mapping before read-only queries.
 racket stringbed/main.rkt lock "$work/export"
 STRINGBED_INTEGRATION_FLAKE="$work/export" racket -l raco test tests/nix-query.rkt
+racket -l raco test tests/query-types.rkt

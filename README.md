@@ -4,32 +4,45 @@ A programmable Racket workbench for Nix configuration. Add packages, compose
 modules, attach your notes, and inspect authored intent alongside Nix's evaluated
 configuration. Nix retains its module, package and build semantics.
 
-**0.2 development workbench:** durable workspaces, pinned extension bundles,
-NixOS and Home Manager scopes, CLI/full-screen TUI/native GUI, discovery,
-explicit lifecycle plans, and an independent fleet library. Automated fixtures
-exercise these components; reconstructing an EmptyNet machine together is the
-next user verification pass. See [architecture.md](architecture.md) for component
-contracts, reasoning, limitations and validation boundaries.
+**0.3 development workbench:** an Emacs frontend for discovery, typed editing,
+annotations and provenance, backed by durable Racket sessions and pinned Nix
+queries. NixOS/Home Manager scopes, explicit lifecycle plans and the independent
+fleet library remain available. Machine reconstruction is paused for frontend
+review. See [architecture.md](architecture.md) for contracts and limitations.
 
 ## Start
 
-Install Racket with GUI libraries; install Nix for evaluation/builds. From a checkout:
+Open an existing workspace with the pinned terminal Emacs launcher:
+
+```sh
+nix run . -- edit /absolute/path/to/home.sbd
+# Equivalent launcher:
+nix run .#emacs -- /absolute/path/to/home.sbd
+```
+
+Press `a` to search packages, `o` for options, `?` for actions, `s` to save and
+`u` to undo. Catalogues have sortable columns; `RET` inspects a result and `a`
+adds the selected package. Option forms use typed controls and validate before
+changing the draft. See the [Emacs walkthrough](docs/emacs.md) for input locking,
+package integration, provenance and source navigation.
+
+For a **new** workspace, initialize once and set its metadata. Existing
+workspaces do not need initialization or automatic migration:
 
 ```sh
 racket stringbed/main.rkt init home.sbd
 racket stringbed/main.rkt edit home.sbd '(meta user "alice")'
 racket stringbed/main.rkt edit home.sbd '(meta home-directory "/home/alice")'
-racket stringbed/main.rkt edit home.sbd '(add package "search")'
-racket stringbed/main.rkt edit home.sbd '(set "search" attribute "ripgrep")'
+racket stringbed/main.rkt edit home.sbd '(add package "search" #hash((attribute . "ripgrep")))'
 racket stringbed/main.rkt edit home.sbd '(note "search" "Search my research projects.")'
-racket stringbed/main.rkt tui home.sbd
-racket stringbed/main.rkt gui home.sbd
+racket stringbed/main.rkt edit home.sbd
 ```
 
-CLI edits save immediately. GUI/TUI edits remain drafts until Save; undo survives
-reopening. Choose the actual platform, paths and state version before deployment.
+CLI command edits save immediately. Interactive edits remain drafts until Save;
+undo survives reopening. Choose the actual platform, paths and state version before deployment.
 Defaults are example values, not detected machine facts. `nix run` packages the
-command; `nix develop` supplies the development environment.
+command; `nix develop` supplies Racket, Nix and Emacs with the frontend dependencies.
+The older `tui FILE` and `gui FILE` commands remain compatibility interfaces.
 
 ## Export and inspect
 
@@ -50,7 +63,8 @@ Search tries exact package attributes first; broader search can be expensive.
 
 | Shared command | Purpose |
 |---|---|
-| `(add package "id")`, `(set "id" attribute "fd")` | Add/configure a package |
+| `(add package "id" #hash((attribute . "fd")))` | Explicit package creation; the Emacs catalogue also verifies the selection and generates IDs |
+| `(add option "id" #hash((path . "programs.git.enable") (value . #t)))` | Explicit low-level option creation; the Emacs frontend adds pinned Nix type validation |
 | `(add module "id")`, `(input fleet "path:/absolute/fleet-library")` | Import independent module providers |
 | `(note "id" "Reason")`, `(docs "id" ("URL"))` | Personal annotation and upstream links |
 | `(meta target nixos)` | Choose the system adapter |
@@ -123,6 +137,7 @@ implementations remain with their producers.
 - [Roadmap and complete EmptyNet migration plan](docs/roadmap.md)
 - [Capability ownership ledger](packages/fleet-library/MIGRATION.md)
 
-Run `bash tests/check.sh` for local automated tests (Racket, Nix and Xvfb required).
+Run `bash tests/check.sh` for local automated tests (Racket, Nix, Emacs with
+Magit Section/Transient, Python 3 and Xvfb required).
 The full Nix fixture check is `bash tests/fleet-library.sh`.
 NWM inspired source/structure interaction; no implementation was copied.

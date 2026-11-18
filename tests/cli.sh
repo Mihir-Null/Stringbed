@@ -3,13 +3,13 @@ set -euo pipefail
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 racket stringbed/main.rkt init "$work/home.sbd"
-racket stringbed/main.rkt edit "$work/home.sbd" '(add package "search")'
+racket stringbed/main.rkt edit "$work/home.sbd" '(add package "search" #hash((attribute . "ripgrep")))'
 racket stringbed/main.rkt edit "$work/home.sbd" '(set "search" attribute "fd")'
 racket stringbed/main.rkt edit "$work/home.sbd" '(note "search" "My note")'
 racket stringbed/main.rkt edit "$work/home.sbd" '(why "search")' | grep -q 'My note'
 printf '(note "search" "temporary")\n(undo)\n(save)\nquit\n' | racket stringbed/main.rkt tui "$work/home.sbd"
 racket stringbed/main.rkt edit "$work/home.sbd" '(why "search")' | grep -q 'My note'
-printf '2\npackage\nmenu-node\n3\nmenu-node\nattribute\njq\n7\nq\n' | racket stringbed/main.rkt tui "$work/home.sbd"
+printf '2\npackage\nmenu-node\nfd\n3\nmenu-node\nattribute\njq\n7\nq\n' | racket stringbed/main.rkt tui "$work/home.sbd"
 racket stringbed/main.rkt edit "$work/home.sbd" '(why "menu-node")' | grep -q jq
 racket stringbed/main.rkt generate examples/programmatic.rkt "$work/generated.sbd"
 racket stringbed/main.rkt edit "$work/generated.sbd" '(validate)'

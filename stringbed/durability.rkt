@@ -91,9 +91,15 @@
      (make-directory* (path-only (extension-lock-path path)))
      (atomic-write-bytes (extension-lock-path path) (datum-bytes lock))
      record)))
+;; This digest names the pre-Emacs API. The struct ABI and existing validation
+;; semantics are unchanged; JSON null/finite numbers and safe digit-leading
+;; attribute segments only widen accepted input.
+;; Do not accept arbitrary historical digests or silently rewrite an old lock.
+(define compatible-api-sha256 '("35f0a8fcec9fbddffa65b39896a373b53354d985952ddc892b3deb5738a4ea32"))
 (define (verify-extension-lock! path)
   (define lock (read-extension-lock path))
-  (unless (equal? (hash-ref lock 'api-sha256 #f) (bytes-digest (file->bytes api-path)))
+  (unless (or (equal? (hash-ref lock 'api-sha256 #f) (bytes-digest (file->bytes api-path)))
+              (member (hash-ref lock 'api-sha256 #f) compatible-api-sha256))
     (error 'extension "Stringbed extension API changed; explicitly re-pin extensions"))
   (unless (equal? (hash-ref lock 'racket-version #f) (version))
     (error 'extension "Racket version changed; explicitly re-pin extensions"))
@@ -106,7 +112,7 @@
       (error 'extension "snapshot integrity failure: ~a" id))) lock)
 ;; This is trusted Racket code, NOT a sandbox. Every load gets fresh module
 ;; instances; the public API instance is shared so form predicates still work.
-(define (load-locked-extensions path #:export [export 'forms])
+(define (load-locked-extensions path #:export [export 'forms] #:on-load [on-load (lambda (_path _forms) (void))])
   (define lock (verify-extension-lock! path))
   (define ns (make-base-namespace))
   (namespace-attach-module (namespace-anchor->namespace anchor) api-path ns)
@@ -118,7 +124,9 @@
        (define record (hash-ref (hash-ref lock 'extensions) id))
        (define result (dynamic-require
                        (build-path (store-root path) (hash-ref record 'sha256) (hash-ref record 'entry)) export))
-       (unless (list? result) (error 'extension "~a export must be a list" export)) result)
+       (unless (list? result) (error 'extension "~a export must be a list" export))
+       (on-load (build-path (store-root path) (hash-ref record 'sha256) (hash-ref record 'entry)) result)
+       result)
      (sort (hash-keys (hash-ref lock 'extensions)) string<?))))
 
 (define (load-trusted-extension path #:export [export 'forms])
