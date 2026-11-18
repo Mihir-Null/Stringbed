@@ -1,5 +1,53 @@
 # Workbench validation
 
+## Daemon access regression follow-up (2026-11-18)
+
+Run [44214675265](https://github.com/Mihir-Null/Stringbed/actions/runs/44214675265)
+tested `ef77a6f`, not the current VUI/builder revision. Its apt-installed Nix
+2.18.1 failed while inspecting `/nix/var/nix/daemon-socket/socket`, before the
+generated expressions could be checked. The installation log also reports
+`Could not execute systemctl`. Installing `nix-bin` alone did not establish a
+usable runner store/service environment. The log does not identify which socket
+path component denied traversal; no specific owner, group or mode is inferred.
+
+The existing `7be4f78` workflow fix replaces apt Nix with
+`cachix/install-nix-action@v31`, requires `nix store ping`, and runs interface tests
+in the packaged development shell. The latest baseline run
+[44263069728](https://github.com/Mihir-Null/Stringbed/actions/runs/44263069728)
+passed at `54217c3`, including the locked NixOS/Home Manager queries, fleet
+contract build and disposable SSH checks. Those results predate this follow-up.
+
+`tests/nix-integration.rkt` now passes `--store dummy://` to each real
+`nix-instantiate` invocation. These checks parse generated flakes/modules and
+evaluate values against local package fixtures; they perform no store operations.
+The [Nix 2.18 manual](https://nix.dev/manual/nix/2.18/command-ref/new-cli/nix3-help-stores)
+documents this store for evaluation without accessing a Nix store. All existing
+assertions remain mandatory, and a new case requires invalid syntax and an
+explicit evaluator exception to fail. No environment override is exported to the
+workflow, native query tests or fleet builds; their real store checks remain
+mandatory. A missing Nix executable still fails the suite.
+
+Fresh local results for this follow-up, using relocated Racket 8.16 and Nix
+2.26.3 (no runtime paths were added to the repository):
+
+| Check | Result |
+|---|---|
+| Syntax/value suite with `NIX_REMOTE=unix:///nonexistent-stringbed-daemon/socket` | 11 tests passed, including both deliberate Nix failures |
+| Core/durability/query/context/protocol/builder/lifecycle/UI/TUI/workbench | 110 tests passed |
+| CLI/menu and legacy terminal PTY | Passed |
+| `tests/real-nix.sh` | 6 locked query, 3 native type/package and 1 native builder cases passed; an initial 45-second attempt timed out, then the complete run passed with a longer bound |
+| Real store access | `nix store ping` passed using this host's local fallback store |
+| `tests/fleet-library.sh` | Evaluation passed; initial build failed on missing `/usr/bin/bash-static`; full script then passed with local-only `NIX_CONFIG` settings `sandbox-paths =` and `sandbox = false` |
+| Shell syntax and whitespace | `bash -n` on all four check scripts and `git diff --check` passed |
+
+The exact Nix 2.18.1 socket permissions were not recreated locally. Nix 2.26.3
+also passed the unmodified syntax/value suite with the nonexistent remote; that
+baseline is not a reproduction of the older failure. The explicit dummy store
+removes reliance on default store initialization across versions, as documented
+by Nix. Fresh Emacs/VUI, GUI and disposable SSH checks were not run locally in
+this follow-up; their successful baseline CI results above are separate evidence.
+The sandbox overrides were not committed and do not weaken CI's store checks.
+
 ## VUI and visual module builder
 
 The 0.4 pass pins VUI 1.4.0 at
