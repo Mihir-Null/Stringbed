@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the real standalone terminal Emacs with keyboard input.
 
-Requires Emacs + magit-section and Racket. STRINGBED_EMACS / STRINGBED_RACKET
+Requires Emacs + magit-section + pinned VUI and Racket. STRINGBED_EMACS / STRINGBED_RACKET
 select executables. Uses a disposable copy of the old schema-1 example and
 a synthetic Nix executable fixture for deterministic catalogue/type results.
 """
@@ -40,7 +40,11 @@ class Terminal:
             "  (unless (active-minibuffer-window)\n"
             "   (with-current-buffer (window-buffer (selected-window))\n"
             "    (let ((data `((mode . ,(symbol-name major-mode)) (text . ,(buffer-string))\n"
-            "                  (name . ,(buffer-name)) (point . ,(point)) (widget . ,(and (widget-at) t))\n"
+            "                  (name . ,(buffer-name)) (point . ,(point))\n"
+            "                  (vui . ,(and (derived-mode-p 'vui-mode) (vui-get-instance) t))\n"
+            "                  (field . ,(and (derived-mode-p 'vui-mode) (vui-field-at) t))\n"
+            "                  (key . ,(and (derived-mode-p 'vui-mode) (format \"%s\" (vui-key-at))))\n"
+            "                  (diagnostic . ,(when-let ((log (get-buffer \" *Stringbed diagnostics*\"))) (with-current-buffer log (buffer-string))))\n"
             "                  (pending . ,(if stringbed--connection (hash-table-count (stringbed--connection-pending stringbed--connection)) 0))\n"
             "                  (status . ,(and stringbed--connection (stringbed--connection-status stringbed--connection))))))\n"
             f"      (with-temp-file {json.dumps(str(self.snapshot_path) + '.tmp')} (insert (json-encode data)))\n"
@@ -90,6 +94,8 @@ class Terminal:
         deadline = time.monotonic() + TIMEOUT
         while time.monotonic() < deadline:
             state = self.snapshot()
+            if (state.get("status") or "").startswith("Disconnected:"):
+                raise AssertionError(f"Backend disconnected while waiting for {description}: {state.get('diagnostic') or state['status']}")
             if predicate(state):
                 return state
             self.drain(0.2)
@@ -114,6 +120,7 @@ class Terminal:
 
 
 def main():
+    print("Emacs PTY: starting standalone editor with real backend and synthetic Nix fixture", flush=True)
     terminal = None
     with tempfile.TemporaryDirectory(prefix="stringbed-emacs-pty-") as directory:
         workspace = Path(directory) / "old workspace.sbd"
@@ -146,7 +153,7 @@ def main():
             terminal.wait(lambda s: s["mode"] == "stringbed-catalog-mode" and "programs.bat.enable" in s["text"] and s["pending"] == 0, "option discovery")
             terminal.send(b"\x1b<\r")
             state = terminal.wait(lambda s: s["mode"] == "stringbed-form-mode" and "programs.bat.enable" in s["text"], "Boolean option control")
-            assert "boolean" in state["text"]
+            assert state["vui"] and "boolean" in state["text"], "Option form is not mounted in VUI"
             terminal.send(b"\x1b<\t\r\x03\x03")
             terminal.wait(lambda s: s["pending"] == 0 and s["status"] == "Ready", "typed option validation")
             terminal.buffer(root_buffer)
@@ -160,13 +167,19 @@ def main():
             state = terminal.wait(lambda s: s["mode"] == "stringbed-form-mode", "typed package form")
             assert "displayName" in state["text"] and "attribute" in state["text"]
             terminal.send(b"\x1b<\t")
-            assert terminal.snapshot()["widget"], "TAB did not enter a form widget"
+            assert terminal.snapshot()["field"], "TAB did not enter a VUI text field"
             terminal.send(b"\x03\x11")
             terminal.wait(lambda s: s["mode"] == "stringbed-mode", "return to workspace")
             terminal.find("ripgrep")
             terminal.send(b"n")
             terminal.wait(lambda s: "Personal note" in s["text"] and s["mode"] == "stringbed-form-mode", "note form")
-            terminal.send(b"\x1b<\t\x01\x0bTerminal checkpoint note\x03\x03")
+            terminal.send(b"\x1b<\t")
+            state = terminal.snapshot()
+            assert state["field"] and state["key"] == "text", f"TAB did not focus the note field: {state}"
+            terminal.send(b"\x01\x0b")
+            state = terminal.snapshot()
+            assert state["field"] and state["key"] == "text", f"Clearing the note lost VUI field focus: {state}"
+            terminal.send(b"Terminal checkpoint note\x03\x03")
             terminal.wait(lambda s: s["pending"] == 0 and s["status"] == "Ready", "note validation")
             terminal.command("stringbed-save")
             terminal.wait(lambda s: s["pending"] == 0 and s["status"] == "Ready", "save")
@@ -197,7 +210,7 @@ def main():
             backups = list((workspace.parent / ".stringbed" / "sources").glob("*"))
             assert any(path.read_bytes() == original for path in backups), "original workspace bytes not backed up"
             terminal.close()
-            print("Emacs PTY passed: real backend + synthetic Nix fixture; standalone launch, description search, package selection, Boolean option, tree/widgets, note/save, provenance/source, selected Nix, reopen/undo, original backup, terminal restoration")
+            print("Emacs PTY passed: real backend + synthetic Nix fixture; standalone launch, description search, package selection, VUI Boolean option, tree/VUI fields, note/save, provenance/source, selected Nix, reopen/undo, original backup, terminal restoration")
         except BaseException:
             if terminal:
                 print(re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", terminal.output.decode(errors="replace"))[-6000:])

@@ -12,6 +12,7 @@
           nullable = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; };
           list = lib.mkOption { type = lib.types.listOf lib.types.int; default = []; };
           structured = lib.mkOption { type = lib.types.attrsOf lib.types.bool; default = {}; };
+          anything = lib.mkOption { type = lib.types.anything; default = []; };
           unavailable = lib.mkOption { type = lib.types.str; default = throw "unavailable fixture default"; };
         };
       }];

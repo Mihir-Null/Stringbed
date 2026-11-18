@@ -6,8 +6,8 @@ source-span preservation, Darwin/full closure execution and booted-machine
 activation are not claimed complete. See [validation](validation.md) and the
 [architecture](../architecture.md) for actual evidence and deviations.
 
-The current pass is the **Emacs frontend checkpoint** after hands-on review
-exposed ambiguous defaults and incomplete discovery/typed editing. Verify the
+The current pass adds **VUI forms and a visual module builder** to the Emacs
+frontend after hands-on review exposed incomplete discovery/typed editing. Verify the
 [complete interaction](emacs.md) on the existing review workspace before resuming
 joint recreation of actual EmptyNet modules and one machine. Preserve that
 workspace; do not reinitialize it. No live activation follows from frontend review.

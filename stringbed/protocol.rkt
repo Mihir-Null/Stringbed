@@ -2,12 +2,13 @@
 (require json racket/file racket/list racket/match racket/math racket/path racket/port
          racket/random racket/string
          "model.rkt" "extension.rkt" "compiler.rkt" "session.rkt"
-         "durability.rkt" "query-context.rkt")
+         "durability.rkt" "query-context.rkt" "module-builder.rkt")
 (provide run-server make-backend protocol-handle)
 
 ;; Transport is data only. Each request captures one immutable semantic snapshot;
 ;; successful mutations compare-and-swap against that snapshot's session/revision.
-(struct backend (session registry sources token revision readonly mutex extensions) #:mutable)
+(struct backend (session registry sources token revision readonly mutex extensions [extension-baseline #:auto])
+  #:auto-value #f #:mutable)
 (struct snapshot (session registry sources token revision readonly) #:transparent)
 (struct exn:fail:protocol exn:fail (code field node) #:transparent)
 (define (fail code message [field #f] [node #f])
@@ -168,6 +169,184 @@
         'implementation (hash-ref (snapshot-sources snap) kind (hash 'path 'null 'sha256 'null))
         'definitions (hash-ref definition 'definitions) 'evaluation evaluation 'raw (json-value n)))
 
+(define (extension-bytes path)
+  (define lock (extension-lock-path path))
+  (and (file-exists? lock) (file->bytes lock)))
+(define (builder-candidates snap)
+  (for/list ([item (forms-view snap)])
+    (define kind (string->symbol (hash-ref item 'kind)))
+    (define source (hash-ref (snapshot-sources snap) kind (hash)))
+    (define identity
+      (cond [(memq kind '(package option module)) (hash 'kind "builtin")]
+            [(hash-ref source 'locked #f)
+             (hash 'kind "bundle" 'sha256 (hash-ref source 'bundleSha256)
+                   'entry (hash-ref source 'entry))]
+            [else #f]))
+    (hash-set* item 'source (or identity 'null) 'available (and identity #t)
+               'reason (if identity "" "This development form has no immutable bundle. Pin it before composing it."))))
+(define (builder-dependencies snap)
+  (for/hash ([source (in-hash-values (snapshot-sources snap))]
+             #:when (hash-ref source 'locked #f))
+    (values (hash-ref source 'bundleSha256) (hash-ref source 'bundleDirectory))))
+(define (same-builder-source? a b)
+  (and (hash? a) (hash? b) (equal? (hash-ref a 'kind #f) (hash-ref b 'kind #f))
+       (or (equal? (hash-ref a 'kind #f) "builtin")
+           (and (equal? (hash-ref a 'sha256 #f) (hash-ref b 'sha256 #f))
+                (equal? (hash-ref a 'entry #f) (hash-ref b 'entry #f))))))
+(define (builder-context snap value [source-directory #f])
+  (define spec (validate-builder-spec value))
+  (define candidates (builder-candidates snap))
+  ;; Inspection only reads receipts. Explicit trusted preview/save can load an
+  ;; exact captured child when its original form is not separately installed.
+  ;; The generated main.rkt itself is still loaded only by explicit pin/reload.
+  (define captured (if source-directory
+                       (hash-ref (read-builder-bundle (path->complete-path source-directory)) 'dependencies)
+                       (hash)))
+  (define dependencies
+    (for/fold ([all (builder-dependencies snap)]) ([(digest directory) (in-hash captured)])
+      (hash-set all digest directory)))
+  (define registry (snapshot-registry snap))
+  (define seen (make-hash))
+  (define loaded (make-hash))
+  (for ([composition (hash-ref spec 'compositions)] [index (in-naturals)])
+    (define kind (hash-ref composition 'kind))
+    (define source (hash-ref composition 'source))
+    (define previous (hash-ref seen kind #f))
+    (when (and previous (not (same-builder-source? previous source)))
+      (fail "ambiguous-composition" "One module cannot bind the same form name from two source revisions. Give those forms distinct names."
+            (format "compositions.~a.source" index)))
+    (hash-set! seen kind source)
+    (define candidate (findf (lambda (item) (equal? kind (hash-ref item 'kind))) candidates))
+    (cond
+      [(and candidate (hash-ref candidate 'available)
+            (same-builder-source? source (hash-ref candidate 'source))) (void)]
+      [(and (equal? (hash-ref source 'kind) "bundle")
+            (hash-has-key? captured (hash-ref source 'sha256)))
+       (define digest (hash-ref source 'sha256))
+       (define directory (hash-ref captured digest))
+       (unless (equal? digest (hash-ref (bundle-identity directory) 'sha256))
+         (fail "composition-drift" "A captured dependency changed before preview. Restore its reviewed snapshot." (format "compositions.~a.source" index)))
+       (define key (cons digest (hash-ref source 'entry)))
+       (define forms
+         (hash-ref! loaded key
+           (lambda () (load-trusted-extension (build-path directory (hash-ref source 'entry))))))
+       (define available (make-registry forms))
+       (unless (equal? digest (hash-ref (bundle-identity directory) 'sha256))
+         (fail "composition-drift" "A captured dependency changed while loading." (format "compositions.~a.source" index)))
+       (define descriptor (hash-ref available (string->symbol kind) #f))
+       (unless descriptor (fail "composition-unavailable" (format "The captured bundle does not export ~a." kind) (format "compositions.~a.kind" index)))
+       (set! registry (hash-set registry (string->symbol kind) descriptor))]
+      [else
+       (fail "composition-unavailable"
+             (format "The loaded ~a form does not match this composition's immutable source. Choose its current source, or open the module's captured working derivative." kind)
+             (format "compositions.~a.source" index))]))
+  (values spec registry dependencies))
+(define (new-builder-spec [kind "my-module"])
+  (hash 'schema 1 'kind kind 'description "" 'parameters '() 'assignments '()
+        'compositions '() 'note "" 'docs '() 'sources '()))
+(define (resolved-builder-candidates snap spec registry)
+  (for/fold ([items (builder-candidates snap)]) ([composition (hash-ref spec 'compositions)])
+    (define kind (hash-ref composition 'kind))
+    (define descriptor (hash-ref registry (string->symbol kind)))
+    (define item
+      (hash 'kind kind 'description (form-description descriptor)
+            'fields (for/list ([field (form-fields descriptor)])
+                      (hash 'name (symbol->string (field-name field)) 'type (symbol->string (field-type field))
+                            'default (json-value (field-default field)) 'description (field-description field)))
+            'source (hash-ref composition 'source) 'available #t 'reason ""))
+    (append (filter (lambda (existing) (not (equal? kind (hash-ref existing 'kind)))) items) (list item))))
+(define (builder-inspection snap params)
+  (define kind (and (hash-has-key? params 'kind) (string->symbol (str params 'kind))))
+  (define source (and kind (hash-ref (snapshot-sources snap) kind #f)))
+  (when (and kind (not source)) (fail "unknown-form" "The selected form is not loaded." "kind"))
+  (define directory
+    (cond [(hash-has-key? params 'directory) (path->complete-path (str params 'directory))]
+          [(and source (hash-ref source 'bundleDirectory #f)) (string->path (hash-ref source 'bundleDirectory))]
+          [else #f]))
+  (define immutable?
+    (and directory (regexp-match? #px"(?:^|/)\\.stringbed/extensions(?:/|$)"
+                                   (path->string (simplify-path directory)))))
+  (define base (hash 'forms (builder-candidates snap) 'source (or source 'null) 'immutable (and immutable? #t)))
+  (cond
+    [(and directory (file-exists? (build-path directory "builder.json")))
+     (define inspected (read-builder-bundle directory))
+     (define result-base
+       (if (and immutable? (not source))
+           (hash-set base 'source
+                     (hash 'path (path->string (build-path directory (hash-ref inspected 'entry "main.rkt")))
+                           'sha256 (hash-ref inspected 'sourceSha256) 'locked #t
+                           'bundleSha256 (hash-ref inspected 'revision)
+                           'bundleDirectory (path->string directory)))
+           base))
+     (for/fold ([result (hash-set* result-base 'editable #t
+                                'reason (if immutable? "Pinned snapshot: create a working derivative before editing or saving." "")
+                                'extensionId (if source (hash-ref source 'extensionId (hash-ref (hash-ref inspected 'spec) 'kind))
+                                                 (hash-ref (hash-ref inspected 'spec) 'kind)))])
+               ([(key value) (in-hash inspected)])
+       (hash-set result key value))]
+    [else
+     (hash-set* base 'editable #f 'directory (if directory (path->string directory) 'null)
+                'reason "This form is handwritten Racket. Its implementation is inspectable; the visual builder cannot reconstruct arbitrary code. Create a module and compose this form instead.")]))
+(define (builder-workspace snap scope)
+  (define w (session-workspace (snapshot-session snap)))
+  (node-scope w (hash 'scope scope))
+  (if (string-prefix? scope "home:")
+      (let* ([user (substring scope 5)]
+             [home (hash-ref (workspace-homes w) (string->symbol user))])
+        (hash-set* w 'target 'home 'user user 'home-directory (hash-ref home 'home-directory)
+                   'state-version (hash-ref home 'state-version) 'homes (hash)))
+      w))
+(define (native-builder-validation snap spec values scope requested? registry)
+  (cond
+    [(not requested?) (hash 'state "not-evaluated" 'results '()
+                           'message "Structural expansion only. Request native validation against a prepared input lock.")]
+    [else
+     (define context (snapshot-context snap))
+     (cond
+       [(not (equal? (hash-ref context 'state) "ready"))
+        (hash 'state "needs-lock" 'results '() 'message "Prepare the workspace input lock before native validation.")]
+       [else
+        (define expanded (builder-expand spec values (builder-workspace snap scope) registry))
+        (define (plain-value? value)
+          (cond [(or (string? value) (boolean? value) (eq? value 'null) (number? value)) #t]
+                [(list? value) (andmap plain-value? value)]
+                [(hash? value) (andmap plain-value? (hash-values value))]
+                [else #f]))
+        (define results
+          (for/list ([definition expanded] [index (in-naturals)])
+            (define base (hash 'index index))
+            (cond
+              [(or (nix-import? definition) (not (plain-value? (assignment-value definition))))
+               (hash-set* base 'state "not-evaluated" 'message "Imports and executable Nix values require full workspace evaluation.")]
+              [else
+               (define path (string-join (assignment-path definition) "."))
+               (with-handlers ([exn:fail? (lambda (e)
+                                          (define invalid?
+                                            (and (exn:fail:query? e)
+                                                 (member (exn:fail:query-code e) '("unknown-option" "invalid-option-value"))))
+                                          (hash-set* base 'path path 'state (if invalid? "invalid" "error") 'message (exn-message e)
+                                                     'field (format "definitions.~a.~a" index
+                                                                    (if (exn:fail:query? e) (exn:fail:query-field e) "value"))))])
+                 (unless (equal? (attr-path path) (assignment-path definition))
+                   (fail "unsupported-path" "This quoted attribute path needs full workspace evaluation." "path"))
+                 (context-validate-option context path (assignment-value definition) #:scope scope)
+                 (hash-set* base 'path path 'state "type-valid"
+                            'message "Nix option type checked; workspace assertions and merge conflicts are separate."))])))
+        (hash 'state (cond [(ormap (lambda (item) (equal? (hash-ref item 'state) "error")) results) "error"]
+                           [(ormap (lambda (item) (equal? (hash-ref item 'state) "invalid")) results) "invalid"]
+                           [(ormap (lambda (item) (equal? (hash-ref item 'state) "not-evaluated")) results) "partial"]
+                           [else "type-valid"])
+              'results results 'context context
+              'message "Native option type checks are separate from full workspace evaluation and activation.")])]))
+(define (saved-builder-result result)
+  (define identity (bundle-identity (hash-ref result 'directory)))
+  (hash-set result 'reviewDigest (hash-ref identity 'sha256)))
+(define (install-builder-registry! b snap registry sources baseline)
+  (set-backend-registry! b registry)
+  (set-backend-sources! b sources)
+  (set-backend-extension-baseline! b baseline)
+  (set-backend-revision! b (add1 (backend-revision b))))
+
 (define (validate-envelope request)
   (unless (and (hash? request) (equal? (hash-ref request 'v #f) 1)
                (let ([id (hash-ref request 'id #f)]) (or (string? id) (exact-integer? id))))
@@ -186,13 +365,17 @@
      (define s (open-session path))
      (define sources (make-hash))
      (define data-only? (hash-ref p 'dataOnly #f))
+     (define lock-baseline (and (not data-only?) (extension-bytes path)))
      (define r (if data-only? (load-registry #:sources sources)
                    (load-registry (backend-extensions b) (path-only path) #:workspace path #:sources sources)))
+     (unless (or data-only? (equal? lock-baseline (extension-bytes path)))
+       (fail "extension-drift" "The extension lock changed while opening. Retry after the other writer finishes."))
      (guard b
        (lambda ()
          (set-backend-session! b s) (set-backend-registry! b r) (set-backend-sources! b sources)
          (set-backend-token! b (bytes-digest (crypto-random-bytes 32)))
          (set-backend-revision! b 0) (set-backend-readonly! b data-only?)
+         (set-backend-extension-baseline! b lock-baseline)
          (define snap (snapshot (clone-session s) r sources (backend-token b) 0 data-only?))
          (values (workspace-view snap) snap)))]
     [else
@@ -203,6 +386,127 @@
      (match method
        ["workspace" (plain (workspace-view snap))]
        ["forms" (plain (forms-view snap))]
+       ["builder/new"
+        (plain (hash 'spec (validate-builder-spec (new-builder-spec (hash-ref p 'kind "my-module")))
+                     'forms (builder-candidates snap) 'editable #t))]
+       ["builder/inspect" (plain (builder-inspection snap p))]
+       ["builder/refresh-builtins"
+        (writeable! snap)
+        (plain (hash 'spec (refresh-builder-builtins (required p 'spec hash? "an object"))
+                     'message "Direct built-in identity refreshed in this draft. Preview, save and pin explicitly; captured child bundles retain their own identities."))]
+       ["builder/preview"
+        (writeable! snap)
+        (define-values (spec preview-registry _dependencies)
+          (builder-context snap (required p 'spec hash? "an object") (hash-ref p 'sourceDirectory #f)))
+        (define vals (hash-ref p 'values (hash)))
+        (unless (hash? vals) (fail "invalid-params" "values must be an object." "values"))
+        (define scope (scope-for snap p))
+        (define preview (preview-builder spec vals (builder-workspace snap scope) preview-registry))
+        (define validation (native-builder-validation snap spec vals scope (hash-ref p 'validate #f) preview-registry))
+        (plain (hash-set* preview 'nativeValidation validation
+                         'forms (resolved-builder-candidates snap spec preview-registry)))]
+       ["builder/save"
+        (writeable! snap)
+        (define destination (path->complete-path (str p 'directory)))
+        (define source-directory (hash-ref p 'sourceDirectory (and (directory-exists? destination) destination)))
+        (define-values (spec save-registry dependencies)
+          (builder-context snap (required p 'spec hash? "an object") source-directory))
+        (guard b
+          (lambda ()
+            (ensure-current b snap)
+            (define saved
+              (save-builder-bundle! spec destination
+                                    #:registry save-registry
+                                    #:dependencies dependencies
+                                    #:source-directory source-directory
+                                    #:expected-revision (hash-ref p 'expectedRevision #f)))
+            (plain (saved-builder-result saved))))]
+       ["builder/derive"
+        (writeable! snap)
+        (define inspected (builder-inspection snap (hash 'kind (str p 'kind))))
+        (unless (hash-has-key? inspected 'spec)
+          (fail "builder-unavailable" (hash-ref inspected 'reason) "kind"))
+        (define-values (derived-spec derived-registry dependencies)
+          (builder-context snap (hash-ref inspected 'spec) (hash-ref inspected 'directory)))
+        (guard b
+          (lambda ()
+            (ensure-current b snap)
+            (define saved
+              (save-builder-bundle! derived-spec (path->complete-path (str p 'directory))
+                                    #:registry derived-registry
+                                    #:dependencies dependencies
+                                    #:source-directory (hash-ref inspected 'directory)))
+            (plain (hash-set (saved-builder-result saved) 'extensionId (hash-ref inspected 'extensionId)))))]
+       ["builder/pin"
+        (writeable! snap)
+        (define directory (path->complete-path (str p 'directory)))
+        (define inspected (read-builder-bundle directory))
+        (define review-digest (str p 'reviewDigest))
+        (unless (equal? review-digest (hash-ref (bundle-identity directory) 'sha256))
+          (fail "builder-drift" "The bundle changed since review. Inspect and preview it again before pinning." "reviewDigest"))
+        (define extension-id (str p 'extensionId))
+        (guard b
+          (lambda ()
+            (ensure-current b snap)
+            (unless (equal? (session-baseline s) (file->bytes (session-path s)))
+              (fail "source-drift" "The workspace file changed externally. Reconcile or reopen before changing its extension pin."))
+            (unless (equal? (backend-extension-baseline b) (extension-bytes (session-path s)))
+              (fail "extension-drift" "Another process changed the extension lock. Reload and review the current forms before pinning."))
+            (define candidate-registry #f)
+            (define candidate-sources (make-hash))
+            (define candidate-baseline #f)
+            (define candidate-result #f)
+            (define candidate-snapshot #f)
+            (define record
+              (pin-extension! (session-path s) extension-id directory (hash-ref inspected 'entry "main.rkt")
+                #:validate
+                (lambda (lock)
+                  ;; Recheck after acquiring the cooperating-writer lock; another
+                  ;; process may have changed source/pins since the preflight.
+                  (unless (equal? (session-baseline s) (file->bytes (session-path s)))
+                    (fail "source-drift" "The workspace changed before the pin lock was acquired. Reconcile or reopen first."))
+                  (unless (equal? (backend-extension-baseline b) (extension-bytes (session-path s)))
+                    (fail "extension-drift" "The extension lock changed before pinning. Reload and review before retrying."))
+                  (unless (equal? review-digest (hash-ref (hash-ref (hash-ref lock 'extensions) extension-id) 'sha256))
+                    (fail "builder-drift" "The bundle changed while pinning. Review it again." "reviewDigest"))
+                  (set! candidate-registry
+                        (load-registry (backend-extensions b) (path-only (session-path s))
+                                       #:workspace (session-path s) #:sources candidate-sources #:lock lock))
+                  (validate-workspace w candidate-registry)
+                  (set! candidate-snapshot
+                        (snapshot (clone-session s) candidate-registry candidate-sources
+                                  (snapshot-token snap) (add1 (snapshot-revision snap)) #f))
+                  (set! candidate-result (hash 'workspace (workspace-view candidate-snapshot)
+                                               'forms (forms-view candidate-snapshot)))
+                  ;; Force the exact response through the wire serializer before
+                  ;; adoption, so malformed trusted metadata cannot fail afterward.
+                  (jsexpr->string (json-value candidate-result))
+                  (set! candidate-baseline
+                        (call-with-output-bytes (lambda (out) (write lock out) (newline out)))))
+                #:commit
+                (lambda (_lock _record)
+                  (install-builder-registry! b snap candidate-registry candidate-sources candidate-baseline))))
+            (values (hash-set candidate-result 'bundle
+                              (hash 'directory (path->string directory) 'sha256 (hash-ref record 'sha256)
+                                    'entry (hash-ref record 'entry))) candidate-snapshot)))]
+       ["builder/reload"
+        (writeable! snap)
+        (define baseline (extension-bytes (session-path s)))
+        (define sources (make-hash))
+        (define registry
+          (load-registry (backend-extensions b) (path-only (session-path s))
+                         #:workspace (session-path s) #:sources sources))
+        (validate-workspace w registry)
+        (guard b
+          (lambda ()
+            (ensure-current b snap)
+            (unless (equal? baseline (extension-bytes (session-path s)))
+              (fail "extension-drift" "The extension lock changed while loading. Retry after the other writer finishes."))
+            (define next (snapshot (clone-session s) registry sources (snapshot-token snap) (add1 (snapshot-revision snap)) #f))
+            (define result (hash 'workspace (workspace-view next) 'forms (forms-view next)))
+            (jsexpr->string (json-value result))
+            (parameterize-break #f (install-builder-registry! b snap registry sources baseline))
+            (values result next)))]
        ["context" (progress "Preparing the workspace input lock and query snapshot…") (plain (snapshot-context snap p))]
        ["package-search"
         (progress "Searching packages from the pinned nixpkgs input…")
@@ -295,6 +599,7 @@
                    (define h2 (if (exn:fail:protocol-field e) (hash-set h 'field (exn:fail:protocol-field e)) h))
                    (if (exn:fail:protocol-node e) (hash-set h2 'node (exn:fail:protocol-node e)) h2)]
                   [(exn:fail:query? e) (hash 'code (exn:fail:query-code e) 'message (exn-message e) 'field (or (exn:fail:query-field e) 'null))]
+                  [(exn:fail:builder? e) (hash 'code (exn:fail:builder-code e) 'message (exn-message e) 'field (exn:fail:builder-field e))]
                   [else (hash 'code "validation" 'message (exn-message e))]))
           (hash-set (base (backend-token b) (backend-revision b)) 'error detail))])
     (define-values (result snap) (thunk))
@@ -311,7 +616,7 @@
   (define jobs-lock (make-semaphore 1))
   (define (emit obj)
     (call-with-semaphore write-lock (lambda () (write-json (json-value obj) output) (newline output) (flush-output output))))
-  (define cancellable '("context" "package-search" "option-search" "option-detail" "evaluate" "build" "provenance"))
+  (define cancellable '("context" "package-search" "option-search" "option-detail" "evaluate" "build" "provenance" "builder/preview"))
   (define (metadata request)
     (hash 'v 1 'id (hash-ref request 'id 'null) 'session (hash-ref request 'session 'null)
           'revision (hash-ref request 'revision 0)))

@@ -1,7 +1,7 @@
 ;;; stringbed.el --- Inspect and author Nix workspaces -*- lexical-binding: t; -*-
 
-;; Version: 0.3.0
-;; Package-Requires: ((emacs "28.1") (magit-section "3.3.0"))
+;; Version: 0.4.0
+;; Package-Requires: ((emacs "29.1") (magit-section "3.3.0") (vui "1.4.0"))
 ;; Keywords: tools, convenience
 ;; URL: https://github.com/Mihir-Null/Stringbed
 
@@ -17,9 +17,13 @@
 (require 'button)
 (require 'widget)
 (require 'wid-edit)
+(require 'stringbed-vui)
 (require 'tabulated-list)
 (require 'magit-section)
 (require 'browse-url)
+(autoload 'stringbed-builder "stringbed-builder" nil t)
+(autoload 'stringbed-builder-open "stringbed-builder" nil t)
+(autoload 'stringbed-builder-derive "stringbed-builder" nil t)
 (declare-function magit-status "magit" (directory &optional cache))
 
 (defgroup stringbed nil "Author declarative workspaces." :group 'tools)
@@ -44,11 +48,19 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
 (defvar-local stringbed--catalog-term nil)
 (defvar-local stringbed--catalog-generation 0)
 (defvar-local stringbed--form-revision nil)
-(defvar-local stringbed--form-widgets nil)
-(defvar-local stringbed--form-error-marker nil)
+(defvar-local stringbed--form-inputs nil)
+(defvar-local stringbed--form-errors nil)
+(defvar-local stringbed--form-title nil)
+(defvar-local stringbed--form-subtitle nil)
+(defvar-local stringbed--form-actions nil)
+(defvar-local stringbed--form-dirty nil)
+(defvar-local stringbed--form-generation 0)
+(defvar-local stringbed--form-pending nil)
 (defvar-local stringbed--form-submit nil)
 (defvar-local stringbed--form-meta nil)
 (defvar stringbed--spinner 0)
+(defvar stringbed-workspace-update-hook nil
+  "Functions called with CONNECTION and VIEW after a backend workspace update.")
 
 (defun stringbed--get (object key &optional default)
   "Read KEY from OBJECT, returning DEFAULT when absent."
@@ -84,7 +96,7 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
     (dolist (buffer (stringbed--connection-buffers connection))
       (when (buffer-live-p buffer) (with-current-buffer buffer (force-mode-line-update))))))
 
-(defun stringbed--request (connection method params callback &optional mutation on-error)
+(defun stringbed--request (connection method params callback &optional mutation on-error after-close)
   "Send METHOD asynchronously.  CALLBACK receives result and full response."
   (unless (stringbed--alive-p connection) (user-error "Stringbed backend is disconnected; reopen the workspace"))
   (when (and mutation (stringbed--connection-mutation connection))
@@ -95,11 +107,32 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
     (unless (equal method "open")
       (setq request (append request `((session . ,(stringbed--connection-session connection)) (revision . ,revision)))))
     (puthash id (list :callback callback :on-error on-error :revision revision :mutation mutation
-                      :method method :buffer (current-buffer)) (stringbed--connection-pending connection))
+                      :method method :buffer (current-buffer) :after-close after-close) (stringbed--connection-pending connection))
     (when mutation (setf (stringbed--connection-mutation connection) id))
     (setf (stringbed--connection-status connection) (concat method "…"))
-    (process-send-string (stringbed--connection-process connection) (concat (stringbed--json request) "\n"))
+    (condition-case problem
+        (process-send-string (stringbed--connection-process connection) (concat (stringbed--json request) "\n"))
+      (error
+       (remhash id (stringbed--connection-pending connection))
+       (when (equal id (stringbed--connection-mutation connection)) (setf (stringbed--connection-mutation connection) nil))
+       (setf (stringbed--connection-status connection) "Request could not be sent")
+       (signal (car problem) (cdr problem))))
     id))
+(defun stringbed--request-error (pending error)
+  "Deliver one terminal ERROR in the request's original live buffer."
+  (let ((handler (plist-get pending :on-error)) (buffer (plist-get pending :buffer)))
+    (if (and handler (buffer-live-p buffer))
+        (with-current-buffer buffer (funcall handler error))
+      (message "Stringbed: %s" (stringbed--get error 'message "Request failed")))))
+(defun stringbed--fail-pending (connection error)
+  "Terminate pending callbacks when their transport can no longer answer."
+  (let (entries)
+    (maphash (lambda (_ entry) (push entry entries)) (stringbed--connection-pending connection))
+    (clrhash (stringbed--connection-pending connection))
+    (setf (stringbed--connection-mutation connection) nil)
+    (dolist (entry entries)
+      (condition-case problem (stringbed--request-error entry error)
+        (error (message "Stringbed error handler: %s" (error-message-string problem)))))))
 (defun stringbed--filter (process text)
   (let* ((connection (process-get process 'stringbed-connection))
          (fragment (concat (stringbed--connection-fragment connection) text))
@@ -111,7 +144,7 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
           (condition-case error
               (stringbed--receive connection (stringbed--parse line))
             (error (setf (stringbed--connection-status connection) "Protocol error")
-                   (message "Stringbed protocol error: %s" (error-message-string error)))))))
+                   (stringbed--fail-pending connection `((code . "protocol-error") (message . ,(error-message-string error)))))))))
     (setf (stringbed--connection-fragment connection) (substring fragment start))))
 (defun stringbed--receive (connection response)
   "Process one data-only RESPONSE; old revisions never repaint a view."
@@ -130,31 +163,31 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
               (open (equal (plist-get pending :method) "open")))
           (cond
            ((and (not open) (not (equal token (stringbed--connection-session connection))))
-            (setf (stringbed--connection-status connection) "Discarded old session"))
+            (setf (stringbed--connection-status connection) "Discarded old session")
+            (stringbed--request-error pending '((code . "wrong-session") (message . "The workspace session changed; refresh before retrying."))))
            (error
             (setf (stringbed--connection-status connection) (stringbed--get error 'message "Failed"))
-            (let ((handler (plist-get pending :on-error)) (buffer (plist-get pending :buffer)))
-              (if (and handler (buffer-live-p buffer))
-                  (with-current-buffer buffer (funcall handler error))
-                (message "Stringbed: %s" (stringbed--get error 'message "Request failed")))))
+            (stringbed--request-error pending error))
            ((< revision (stringbed--connection-revision connection))
-            (setf (stringbed--connection-status connection) "Result is stale; refresh"))
+            (setf (stringbed--connection-status connection) "Result is stale; refresh")
+            (stringbed--request-error pending '((code . "stale-result") (message . "The draft changed while this query ran. Refresh before retrying."))))
            (t
             (setf (stringbed--connection-session connection) token
                   (stringbed--connection-revision connection) revision
                   (stringbed--connection-status connection) "Ready")
             (let ((callback (plist-get pending :callback)) (buffer (plist-get pending :buffer)))
               (when callback
-                (if (buffer-live-p buffer)
-                    (with-current-buffer buffer (funcall callback (stringbed--get response 'result) response))
-                  (funcall callback (stringbed--get response 'result) response)))))))))))
+                (cond ((buffer-live-p buffer)
+                       (with-current-buffer buffer (funcall callback (stringbed--get response 'result) response)))
+                      ((plist-get pending :after-close)
+                       (funcall callback (stringbed--get response 'result) response))))))))))))
 (defun stringbed--sentinel (process event)
   (unless (process-live-p process)
     (let ((connection (process-get process 'stringbed-connection)))
       (when connection
         (setf (stringbed--connection-status connection) (concat "Disconnected: " (string-trim event))
               (stringbed--connection-mutation connection) nil)
-        (clrhash (stringbed--connection-pending connection))
+        (stringbed--fail-pending connection '((code . "disconnected") (message . "The backend disconnected. Your unapplied input is retained; reopen the workspace to reconnect.")))
         (stringbed--tick connection)))))
 
 ;;;###autoload
@@ -194,15 +227,19 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
 (defun stringbed--confirm-close ()
   (or (not stringbed--connection)
       (and (not (stringbed--true-p (stringbed--get (stringbed--connection-workspace stringbed--connection) 'dirty)))
-           (not (stringbed--connection-mutation stringbed--connection)))
+           (not (stringbed--connection-mutation stringbed--connection))
+           (not (cl-some (lambda (buffer) (and (buffer-live-p buffer) (buffer-local-value 'stringbed--form-dirty buffer)))
+                         (stringbed--connection-buffers stringbed--connection))))
       (y-or-n-p "Discard Stringbed's unsaved draft or pending edit? ")))
 (defun stringbed--confirm-exit ()
   (cl-every (lambda (buffer)
               (with-current-buffer buffer
-                (or (not (derived-mode-p 'stringbed-mode))
-                    (not stringbed--connection)
-                    (not (eq buffer (stringbed--connection-root stringbed--connection)))
-                    (stringbed--confirm-close))))
+                (cond
+                 ((not stringbed--connection) t)
+                 ((eq buffer (stringbed--connection-root stringbed--connection)) (stringbed--confirm-close))
+                 ((and stringbed--form-dirty (not (buffer-live-p (stringbed--connection-root stringbed--connection))))
+                  (stringbed--confirm-form-close))
+                 (t t))))
             (buffer-list)))
 (defun stringbed--close ()
   (when (and stringbed--connection
@@ -217,17 +254,34 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (setq stringbed--selected-id (or (stringbed--get view 'selectedId) stringbed--selected-id))
-        (stringbed--render)))))
+        (stringbed--render))))
+  (run-hook-with-args 'stringbed-workspace-update-hook connection view))
 (defun stringbed--mutate (method params &optional done on-error)
-  (let ((connection (stringbed--conn)))
+  (let ((connection (stringbed--conn)) (origin (current-buffer))
+        (form-generation (and (derived-mode-p 'stringbed-form-mode) stringbed--form-generation)))
     (when (stringbed--true-p (stringbed--get (stringbed--connection-workspace connection) 'readOnly))
       (user-error "This workspace is open for data-only inspection"))
     (stringbed--request connection method params
                         (lambda (view response)
+                          ;; The shared snapshot must advance even if its editor was closed.
                           (stringbed--accept-view connection view)
-                          (when (derived-mode-p 'stringbed-form-mode)
-                            (setq stringbed--form-revision (stringbed--connection-revision connection)))
-                          (when done (funcall done view response))) t on-error)))
+                          (when (buffer-live-p origin)
+                            (with-current-buffer origin
+                              (when (derived-mode-p 'stringbed-form-mode)
+                                (setq stringbed--form-revision (stringbed--connection-revision connection)
+                                      stringbed--form-pending nil)
+                                (when (equal form-generation stringbed--form-generation) (setq stringbed--form-dirty nil))
+                                (stringbed--form-update))
+                              (when done (funcall done view response)))))
+                        t (when on-error
+                            (lambda (error)
+                              (when (buffer-live-p origin)
+                                (with-current-buffer origin
+                                  (funcall on-error
+                                           (if (and form-generation (not (equal form-generation stringbed--form-generation)))
+                                               '((message . "Validation of earlier values failed. Your newer edits are retained; validate again."))
+                                             error))))))
+                        t)))
 
 (defvar stringbed-mode-map
   (let ((map (make-sparse-keymap)))
@@ -236,7 +290,7 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
                     ("e" . stringbed-edit) ("RET" . stringbed-visit) ("n" . stringbed-note)
                     ("D" . stringbed-documentation) ("w" . stringbed-provenance) ("p" . stringbed-preview)
                     ("d" . stringbed-diff) ("s" . stringbed-save) ("u" . stringbed-undo)
-                    ("x" . stringbed-remove) ("l" . stringbed-language) ("f" . stringbed-source)
+                    ("x" . stringbed-remove) ("l" . stringbed-language) ("B" . stringbed-builder) ("f" . stringbed-source)
                     ("C-c C-k" . stringbed-cancel) ("?" . stringbed-dispatch)))
       (define-key map (kbd (car pair)) (cdr pair))) map))
 (define-derived-mode stringbed-mode magit-section-mode "Stringbed"
@@ -471,109 +525,84 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
         (insert "\n\nApplication flags and module options are separate. Find options for this scope with o.\n")))
     (pop-to-buffer buffer)))
 
-(defvar stringbed-field-keymap
-  (let ((map (copy-keymap widget-field-keymap)))
-    (define-key map (kbd "C-c C-c") #'stringbed-form-submit)
-    (define-key map (kbd "C-c C-k") #'stringbed-cancel)
-    (define-key map (kbd "C-c C-q") #'quit-window) map))
 (defvar stringbed-form-mode-map
-  (let ((map (copy-keymap widget-keymap)))
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map vui-mode-map)
     (define-key map (kbd "C-c C-c") #'stringbed-form-submit)
     (define-key map (kbd "C-c C-k") #'stringbed-cancel)
-    (define-key map (kbd "C-c C-q") #'quit-window) map))
-(define-derived-mode stringbed-form-mode fundamental-mode "Stringbed Form"
-  "Typed values with atomic backend validation.  C-c C-c submits."
-  (use-local-map stringbed-form-mode-map)
-  (setq-local truncate-lines nil))
+    (define-key map (kbd "C-c C-q") #'stringbed-form-close) map))
+(define-derived-mode stringbed-form-mode vui-mode "Stringbed Form"
+  "Reactive typed values with atomic backend validation.  C-c C-c submits."
+  (setq-local truncate-lines nil)
+  (stringbed-vui-install-field-keys '(("C-c C-c" . stringbed-form-submit) ("C-c C-k" . stringbed-cancel) ("C-c C-q" . stringbed-form-close)))
+  (add-hook 'kill-buffer-query-functions #'stringbed--confirm-form-close nil t))
+(defun stringbed--confirm-form-close ()
+  (or (not stringbed--form-dirty)
+      (y-or-n-p "Discard the unapplied edits in this Stringbed form? ")))
+(defun stringbed-form-close ()
+  "Hide the form, keeping its unapplied values available in its buffer."
+  (interactive) (quit-window))
 (defun stringbed--field (name control value description)
-  "Insert a widget for CONTROL, retaining typed JSON values."
-  (insert (propertize (concat name "\n") 'face 'bold))
-  (when (and description (not (string-empty-p description)))
-    (insert (propertize (concat description "\n") 'face 'stringbed-muted)))
-  (when (and (equal (stringbed--get control 'kind) "string")
-             (not (stringp value)) (not (eq value :stringbed-unset)))
-    (insert (propertize "The existing value is not a string. Correct its JSON value (put strings in quotes).\n" 'face 'error))
-    (setq control '((kind . "advanced"))))
-  (let* ((kind (stringbed--get control 'kind "advanced"))
-         (widget
-          (cond
-           ((equal kind "boolean")
-            (if (memq value '(t :false))
-                (widget-create 'checkbox :value (eq value t))
-              (insert (propertize (if (eq value :stringbed-unset) "Choose true or false; no default is declared.\n"
-                                    (format "Existing value %s is not a Boolean. Choose true or false.\n" (stringbed--display-value value))) 'face 'error))
-              (widget-create 'menu-choice :tag "Boolean" :value :stringbed-unset
-                             '(const :tag "Choose true or false" :stringbed-unset)
-                             '(const :tag "true" t) '(const :tag "false" :false))))
-           ((equal kind "enum")
-            (apply #'widget-create 'menu-choice :tag "Choose value" :value value
-                   (mapcar (lambda (choice) `(const :tag ,(stringbed--display-value choice) ,choice)) (stringbed--get control 'choices))))
-           ((equal kind "nullable")
-            (widget-create 'editable-field :keymap stringbed-field-keymap :size 60 :value (if (eq value :stringbed-unset) "" (stringbed--json value))))
-           ((member kind '("integer" "number"))
-            (widget-create 'editable-field :keymap stringbed-field-keymap :size 24 :value (if (numberp value) (number-to-string value) "")))
-           ((equal kind "string")
-            (widget-create 'editable-field :keymap stringbed-field-keymap :size 60 :value (if (stringp value) value "")))
-           (t
-            (insert (propertize "JSON value (strings in quotes; lists [ ]; objects { }; null allowed by schema)\n" 'face 'stringbed-muted))
-            (widget-create 'editable-field :keymap stringbed-field-keymap :size 70 :value (if (eq value :stringbed-unset) "" (stringbed--json value)))))))
-    (widget-put widget :stringbed-name name)
-    (widget-put widget :stringbed-control control)
-    (push (cons name widget) stringbed--form-widgets)
-    (insert "\n\n") widget))
-(defun stringbed--field-value (widget)
-  (let* ((value (widget-value widget))
-         (kind (stringbed--get (widget-get widget :stringbed-control) 'kind "advanced")))
-    (cond ((equal kind "boolean")
-           (when (eq value :stringbed-unset) (user-error "Choose true or false; the original value is invalid"))
-           (if (eq value t) t :false))
-          ((member kind '("enum" "string")) value)
-          ((member kind '("integer" "number"))
-           (unless (string-match-p (if (equal kind "integer") "\\`[-+]?[0-9]+\\'" "\\`[-+]?[0-9]+\\(?:\\.[0-9]+\\)?\\(?:[eE][-+]?[0-9]+\\)?\\'") value)
-             (user-error "%s: enter a %s" (widget-get widget :stringbed-name) kind))
-           (string-to-number value))
-          (t (condition-case nil (stringbed--parse value)
-               (error (user-error "%s: enter valid JSON" (widget-get widget :stringbed-name))))))))
+  "Register a controlled VUI input; `stringbed--finish-form' mounts the form."
+  (let ((input (stringbed-vui-input name control value description)))
+    (setq stringbed--form-inputs (append stringbed--form-inputs (list input))) input))
+(defun stringbed--field-value (input) (stringbed-vui-input-value input))
+(defun stringbed--form-update ()
+  "Reconcile changed props without remounting or erasing field state."
+  (stringbed-vui-update-form stringbed--form-inputs stringbed--form-errors stringbed--form-pending))
+(defun stringbed--form-input-change (input)
+  (setq stringbed--form-inputs (stringbed-vui-replace-input stringbed--form-inputs input)
+        stringbed--form-errors (cl-remove (stringbed-vui-input-name input) stringbed--form-errors :key #'car :test #'equal)
+        stringbed--form-dirty t)
+  (cl-incf stringbed--form-generation)
+  (stringbed--form-update))
 (defun stringbed--finish-form (submit)
   (setq stringbed--form-submit submit
         stringbed--form-revision (stringbed--connection-revision (stringbed--conn)))
-  (setq stringbed--form-error-marker (copy-marker (point)))
-  (insert "\n")
-  (widget-create 'push-button :notify (lambda (&rest _) (stringbed-form-submit)) "Validate and apply")
-  (insert "  ") (widget-create 'push-button :notify (lambda (&rest _) (quit-window)) "Close")
-  (insert "\n\nC-c C-c validates and updates the draft. Save the workspace separately.\n")
-  (widget-setup)
-  (goto-char (point-min)) (set-buffer-modified-p nil))
+  (let ((buffer (current-buffer)))
+    (vui-mount (stringbed-vui-form
+                :title (or stringbed--form-title "Stringbed") :subtitle stringbed--form-subtitle
+                :inputs stringbed--form-inputs :errors stringbed--form-errors :actions stringbed--form-actions
+                :on-change (lambda (input) (when (buffer-live-p buffer) (with-current-buffer buffer (stringbed--form-input-change input))))
+                :on-submit (lambda () (when (buffer-live-p buffer) (with-current-buffer buffer (stringbed-form-submit))))
+                :on-close (lambda () (when (buffer-live-p buffer) (with-current-buffer buffer (stringbed-form-close)))))
+               buffer t))
+  (set-buffer-modified-p nil))
 (defun stringbed--form-error (error)
   (let ((message (stringbed--get error 'message "Validation failed")) (field (stringbed--get error 'field)))
-    (let ((inhibit-read-only t))
-      (save-excursion
-        (goto-char stringbed--form-error-marker)
-        (insert (propertize (format "%s%s\n" (if field (concat field ": ") "") message) 'face 'error))))
-    (when-let ((widget (cdr (assoc field stringbed--form-widgets))))
-      (goto-char (or (widget-field-start widget) (widget-get widget :from) (point-min))))
+    (setq stringbed--form-pending nil
+          stringbed--form-errors (cons (cons field message) (cl-remove field stringbed--form-errors :key #'car :test #'equal)))
+    (stringbed--form-update)
+    (vui-flush-sync)
+    (when field (vui-goto-key field))
     (message "%s" message)))
 (defun stringbed-form-submit ()
   (interactive)
   (unless stringbed--form-submit (user-error "No form to submit"))
+  (when stringbed--form-pending (user-error "This form is still being validated"))
   (condition-case error
       (progn
         (unless (= stringbed--form-revision (stringbed--connection-revision (stringbed--conn)))
           (user-error "This form is stale; reopen it from the refreshed workspace before applying"))
-      (let ((values (make-hash-table :test #'equal)))
-        (dolist (entry stringbed--form-widgets) (puthash (car entry) (stringbed--field-value (cdr entry)) values))
-        (funcall stringbed--form-submit values)))
+        (if-let ((invalid (cl-find-if #'stringbed-vui-input-error stringbed--form-inputs)))
+            (stringbed--form-error `((field . ,(stringbed-vui-input-name invalid)) (message . ,(stringbed-vui-input-error invalid))))
+          (let ((values (stringbed-vui-values stringbed--form-inputs)))
+            (setq stringbed--form-errors nil stringbed--form-pending t)
+            (stringbed--form-update)
+            (funcall stringbed--form-submit values))))
     (error (stringbed--form-error `((message . ,(error-message-string error)))))))
 (defun stringbed--option-form (connection detail scope &optional node)
   (let* ((path (stringbed--get detail 'path))
          (buffer (generate-new-buffer (format "*Stringbed option: %s*" path))))
     (with-current-buffer buffer
       (stringbed-form-mode) (stringbed--attach connection)
-      (insert (propertize (concat path "\n") 'face 'stringbed-title) "Scope: " scope "\n"
-              (stringbed--get detail 'description "") "\n\n")
-      (dolist (source (append (stringbed--get detail 'declarations) nil))
-        (stringbed--button (concat "Nix declaration: " source) (lambda () (stringbed--visit-source source))) (insert "\n"))
-      (insert "\n")
+      (setq stringbed--form-title path
+            stringbed--form-subtitle (concat "Scope: " scope "\n" (stringbed--get detail 'description ""))
+            stringbed--form-actions
+            (mapcar (lambda (source)
+                      (vui-button (concat "Nix declaration: " source) :key (list 'source source)
+                                  :on-click (lambda () (stringbed--visit-source source))))
+                    (append (stringbed--get detail 'declarations) nil)))
       (stringbed--field "value" (stringbed--get detail 'control)
                         (if node (stringbed--get (stringbed--get node 'params) 'value)
                           (let ((default (stringbed--get detail 'default :stringbed-unset)))
@@ -585,9 +614,12 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
              (stringbed--mutate "edit" `((node . ,(stringbed--get node 'id)) (values . ,values))
                                (lambda (_ _) (message "Option validated and draft updated")) #'stringbed--form-error)
            (stringbed--mutate "add-option" `((path . ,path) (value . ,(gethash "value" values)) (scope . ,scope))
-                             (lambda (_ _)
-                               (when (buffer-live-p buffer) (kill-buffer buffer))
-                               (pop-to-buffer (stringbed--connection-root connection))
+                             (lambda (view _)
+                               (setq node (cl-find (stringbed--get view 'selectedId) (stringbed--get view 'nodes)
+                                                   :key (lambda (item) (stringbed--get item 'id)) :test #'equal))
+                               (unless stringbed--form-dirty
+                                 (when (buffer-live-p buffer) (kill-buffer buffer))
+                                 (pop-to-buffer (stringbed--connection-root connection)))
                                (message "Option validated and added to draft")) #'stringbed--form-error)))))
     (pop-to-buffer buffer)))
 (defun stringbed--forms (connection callback)
@@ -610,7 +642,7 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
   (let ((buffer (generate-new-buffer (format "*Stringbed %s form*" (stringbed--get descriptor 'kind)))))
     (with-current-buffer buffer
       (stringbed-form-mode) (stringbed--attach connection)
-      (insert (propertize (concat (stringbed--get descriptor 'description) "\n\n") 'face 'stringbed-title))
+      (setq stringbed--form-title (stringbed--get descriptor 'description))
       (stringbed--field "displayName" '((kind . "string")) (if node (stringbed--get node 'displayName) "") "Optional display label; internal identity is preserved separately.")
       (dolist (field (append (stringbed--get descriptor 'fields) nil))
         (let ((name (stringbed--get field 'name)) (type (stringbed--get field 'type)))
@@ -626,10 +658,13 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
            (stringbed--mutate (if node "edit" "add")
                              (append (if node `((node . ,(stringbed--get node 'id))) `((kind . ,(stringbed--get descriptor 'kind))))
                                      `((scope . ,scope) (displayName . ,label) (values . ,values)))
-                             (lambda (_ _)
+                             (lambda (view _)
                                (unless node
-                                 (when (buffer-live-p buffer) (kill-buffer buffer))
-                                 (pop-to-buffer (stringbed--connection-root connection)))
+                                 (setq node (cl-find (stringbed--get view 'selectedId) (stringbed--get view 'nodes)
+                                                     :key (lambda (item) (stringbed--get item 'id)) :test #'equal))
+                                 (unless stringbed--form-dirty
+                                   (when (buffer-live-p buffer) (kill-buffer buffer))
+                                   (pop-to-buffer (stringbed--connection-root connection))))
                                (message "Validated and updated draft")) #'stringbed--form-error)))))
     (pop-to-buffer buffer)))
 
@@ -646,8 +681,7 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
   (let ((buffer (generate-new-buffer (format "*Stringbed: %s*" title))))
     (with-current-buffer buffer
       (stringbed-form-mode) (stringbed--attach connection)
-      (insert (propertize (concat title "\n") 'face 'stringbed-title)
-              (stringbed--get node 'displayName) "\n\n")
+      (setq stringbed--form-title title stringbed--form-subtitle (stringbed--get node 'displayName))
       (stringbed--field field '((kind . "string")) value nil)
       (stringbed--finish-form
        (lambda (values)
@@ -691,6 +725,9 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
          (with-current-buffer buffer
            (let ((inhibit-read-only t))
              (insert (propertize "Loaded language and module forms\n\n" 'face 'stringbed-title))
+             (stringbed--button "New visual module" #'stringbed-builder)
+             (insert "  ") (stringbed--button "Open working module" #'stringbed-builder-open)
+             (insert "\n\n")
              (dolist (form (append forms nil))
                (insert (propertize (stringbed--get form 'kind) 'face 'bold) "\n"
                        (stringbed--get form 'description "") "\n")
@@ -703,6 +740,8 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
                    (insert "\n" (propertize (format "Revision: %s\n" (stringbed--get source 'sha256 "unknown")) 'face 'stringbed-muted))))
                (unless (member (stringbed--get form 'kind) '("package" "option"))
                  (stringbed--button "Configure a new instance" (lambda () (stringbed--generic-form connection form (stringbed--scope connection)))))
+               (insert "  ")
+               (stringbed--button "Create working derivative" (lambda () (stringbed-builder-derive (stringbed--get form 'kind))))
                (insert "\n\n"))
              (insert "Pinned implementations are inspectable snapshots. Create a working derivative and repin with the CLI to change them.\n"
                      "Arbitrary Racket remains editable as source; no visual inverse is assumed.\n")))
@@ -817,7 +856,7 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
   (if (fboundp 'stringbed--transient) (stringbed--transient)
     (let* ((actions '(("Find package" . stringbed-find-package) ("Find option" . stringbed-find-option)
                       ("Edit selection" . stringbed-edit) ("Personal note" . stringbed-note) ("Documentation links" . stringbed-documentation)
-                      ("Provenance" . stringbed-provenance) ("Selected Nix" . stringbed-preview) ("Language browser" . stringbed-language)
+                      ("Provenance" . stringbed-provenance) ("Selected Nix" . stringbed-preview) ("Language browser" . stringbed-language) ("Visual module builder" . stringbed-builder)
                       ("Review changes" . stringbed-diff) ("Save" . stringbed-save) ("Undo" . stringbed-undo) ("Reopen" . stringbed-reopen)
                       ("Prepare initial input lock" . stringbed-prepare-inputs) ("Use existing lock" . stringbed-use-lock)
                       ("Export" . stringbed-export) ("Evaluate" . stringbed-evaluate) ("Build" . stringbed-build) ("Cancel request" . stringbed-cancel)))
@@ -833,7 +872,7 @@ Choose data-only inspection at this prompt to avoid executing workspace code."
         ("x" "Remove selection" stringbed-remove)]
        ["Inspect"
         ("w" "Provenance" stringbed-provenance) ("p" "Selected Nix" stringbed-preview)
-        ("f" "Implementation" stringbed-source) ("l" "Language" stringbed-language)
+        ("f" "Implementation" stringbed-source) ("l" "Language" stringbed-language) ("B" "Module builder" stringbed-builder)
         ("d" "Changes" stringbed-diff) ("G" "Git status" stringbed-git-status)]
        ["Persist"
         ("s" "Save" stringbed-save) ("u" "Undo" stringbed-undo) ("r" "Reopen" stringbed-reopen)

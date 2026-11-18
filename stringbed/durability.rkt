@@ -1,7 +1,7 @@
 #lang racket/base
 (require racket/file racket/list racket/path racket/port racket/runtime-path
          "model.rkt" "extension.rkt")
-(provide pin-extension! read-extension-lock verify-extension-lock! load-locked-extensions load-trusted-extension locked-extension-paths extension-lock-path)
+(provide pin-extension! read-extension-lock verify-extension-lock! load-locked-extensions load-trusted-extension locked-extension-paths extension-lock-path bundle-identity)
 (define-runtime-path api-path "extension.rkt")
 (define-namespace-anchor anchor)
 (define (workspace-root path) (path-only (path->complete-path path)))
@@ -37,11 +37,16 @@
   (for/list ([f files]) (list (car f) (bytes-length (cdr f)) (bytes-digest (cdr f)))))
 (define (datum-bytes datum) (call-with-output-bytes (lambda (out) (write datum out) (newline out))))
 (define (bundle-digest files) (bytes-digest (datum-bytes (manifest files))))
+(define (bundle-identity root)
+  (define files (bundle-files (simplify-path (path->complete-path root) #f)))
+  (hash 'sha256 (bundle-digest files) 'files (manifest files)))
 (define (empty-lock) (hash 'schema 1 'racket-version (version) 'api-sha256 (bytes-digest (file->bytes api-path)) 'extensions (hash)))
 (define (read-extension-lock path)
   (define file (extension-lock-path path))
   (reject-symlink-ancestors file)
   (define lock (if (file-exists? file) (call-with-input-file file read-data) (empty-lock)))
+  (validate-lock lock))
+(define (validate-lock lock)
   (unless (and (hash? lock) (equal? (hash-ref lock 'schema #f) 1)
                (hash? (hash-ref lock 'extensions #f)))
     (error 'extension "unsupported or malformed extension lock"))
@@ -51,7 +56,8 @@
                  (regexp-match? #px"^[a-f0-9]{64}$" (hash-ref record 'sha256)))
       (error 'extension "malformed extension lock entry"))
     (safe-relative (hash-ref record 'entry #f))) lock)
-(define (pin-extension! path id bundle-root entry)
+(define (pin-extension! path id bundle-root entry #:validate [validate-candidate void]
+                        #:commit [adopt-candidate (lambda (_lock _record) (void))])
   (unless (and (string? id) (regexp-match? #px"^[A-Za-z0-9_-]+$" id))
     (error 'extension "extension id must contain letters, numbers, _ or -"))
   (safe-relative entry)
@@ -88,16 +94,24 @@
                           'files (manifest files)))
      (define lock (hash-set (empty-lock) 'extensions
                             (hash-set (hash-ref old 'extensions) id record)))
+     ;; Loading and workspace validation happen against this candidate while the
+     ;; previous lock remains authoritative. A rejected candidate only leaves an
+     ;; unreferenced immutable snapshot; it never replaces the working registry.
+     (validate-candidate lock)
      (make-directory* (path-only (extension-lock-path path)))
-     (atomic-write-bytes (extension-lock-path path) (datum-bytes lock))
+     ;; Protocol adoption consists only of replacing already validated in-memory
+     ;; objects. Defer cooperative cancellation across the disk/in-memory swap.
+     (parameterize-break #f
+       (atomic-write-bytes (extension-lock-path path) (datum-bytes lock))
+       (adopt-candidate lock record))
      record)))
 ;; This digest names the pre-Emacs API. The struct ABI and existing validation
 ;; semantics are unchanged; JSON null/finite numbers and safe digit-leading
 ;; attribute segments only widen accepted input.
 ;; Do not accept arbitrary historical digests or silently rewrite an old lock.
 (define compatible-api-sha256 '("35f0a8fcec9fbddffa65b39896a373b53354d985952ddc892b3deb5738a4ea32"))
-(define (verify-extension-lock! path)
-  (define lock (read-extension-lock path))
+(define (verify-extension-lock! path #:lock [candidate #f])
+  (define lock (if candidate (validate-lock candidate) (read-extension-lock path)))
   (unless (or (equal? (hash-ref lock 'api-sha256 #f) (bytes-digest (file->bytes api-path)))
               (member (hash-ref lock 'api-sha256 #f) compatible-api-sha256))
     (error 'extension "Stringbed extension API changed; explicitly re-pin extensions"))
@@ -112,8 +126,9 @@
       (error 'extension "snapshot integrity failure: ~a" id))) lock)
 ;; This is trusted Racket code, NOT a sandbox. Every load gets fresh module
 ;; instances; the public API instance is shared so form predicates still work.
-(define (load-locked-extensions path #:export [export 'forms] #:on-load [on-load (lambda (_path _forms) (void))])
-  (define lock (verify-extension-lock! path))
+(define (load-locked-extensions path #:export [export 'forms] #:on-load [on-load (lambda (_path _forms) (void))]
+                                #:lock [candidate #f])
+  (define lock (verify-extension-lock! path #:lock candidate))
   (define ns (make-base-namespace))
   (namespace-attach-module (namespace-anchor->namespace anchor) api-path ns)
   (parameterize ([current-namespace ns]

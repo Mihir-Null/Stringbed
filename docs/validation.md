@@ -1,6 +1,34 @@
 # Workbench validation
 
-## Emacs checkpoint
+## VUI and visual module builder
+
+The 0.4 pass pins VUI 1.4.0 at
+`004dd852746d8af838107dd7e3f44c5bbea04d79`. Forms use its actual mounted components
+and deferred state updates; Magit Section and tabulated catalogues retain their
+existing view ownership. The builder has a versioned data definition, deterministic
+Racket projection, guarded working-directory saves and explicit transactional pins.
+
+| Verification | Evidence |
+|---|---|
+| Builder semantics | 9 cases: typed data and binding rejection, generated/preview equivalence, standalone generated code, repeated-save revision guards and exact backups, resource preservation, source/spec drift, captured bundle relocation, immutable derivatives and explicit builtin identity refresh |
+| Builder protocol | 9 cases: save/pin/use/reopen, pinned derivatives, incompatible repin rollback, stale review/lock rejection, data-only boundaries, exact composition identities, native-status distinction, portable captured children and builtin refresh |
+| Emacs/VUI/builder | 50 ERT cases passed together with no skips: exact JSON and mixed enums, invalid raw edits, nullable controls, focus/scroll retention, stale previews and callbacks, closed-editor completion, transport failure cleanup, composition metadata, repeated saves and backend persistence |
+| Existing contracts | Core, durability, UI extension, workbench, lifecycle and TUI suites passed (57 cases); existing protocol, query context and Nix query suites also passed |
+| CLI and legacy terminal | CLI/menu edit/save/undo/generator checks and real ANSI PTY restoration passed |
+| Ordinary Emacs terminal | Full keyboard flow passed with actual VUI controls: package selection, Boolean option, clearing a focused note without losing focus, typing/applying/saving, provenance, reopen/undo, exact backup and terminal restoration |
+| Builder terminal | Real keyboard create/parameter/option-picker/composition flow, generated preview, separate native-validation status, save twice, pin/use, workspace persistence, reopen, derivative edit/repin, prior snapshot integrity and terminal restoration passed |
+| Native builder validation | Actual pinned NixOS `programs.git.enable` accepted `true`, rejected integer `5`, and left the workspace draft unchanged; process failures report `error` rather than a false type rejection |
+| Native control metadata | 3 native type/package cases passed, including `types.anything` as an advanced JSON control accepting scalar and list values; option metadata cache version advanced so old controls are not reused |
+| VUI dependency | Exact pinned VUI derivation built; packaged Emacs loaded `vui` and `vui-components` under `--batch -Q` |
+| Standalone package | `.#emacs` built; Emacs 31.1/Racket 9.3 loaded all compiled Stringbed/VUI/builder libraries under `-Q`. The built launcher opened a workspace and restored its terminal; the full ordinary Emacs PTY passed against the same immutable source snapshot |
+
+Terminal fixtures use the real Racket backend and an explicitly synthetic Nix
+executable for repeatable discovery/type responses. Native Nix checks are separate;
+fixture responses do not establish upstream package builds or machine behavior.
+The visual builder is not an inverse for arbitrary Racket, and native option type
+validation is not full workspace evaluation or activation.
+
+## Previous Emacs checkpoint
 
 The 0.3 pass adds an ordinary Emacs package and pinned terminal launcher. The
 terminal test uses actual keyboard input and the real Racket backend, with an
@@ -19,18 +47,19 @@ upstream package builds or machine activation.
 | Native package/source | Exact ripgrep 15.2.0 lookup returned homepage and an existing absolute Nix source location |
 | Native NixOS scope | `services.openssh.enable` discovered as Boolean and rejected value `5`; `networking.hostName` returned effective value and definition locations |
 | Integrated Home Manager | `home:demo` option discovery and effective `programs.git.enable = true` passed; incomplete definition origins remain explicitly labelled |
-| Packaging | An earlier checkpoint snapshot's pinned launcher built; packaged Emacs loaded Stringbed, Magit Section and Transient under `--quick`. Final source package build is a CI gate as described below |
+| Packaging | The `7be4f78` workflow completed successfully, including the packaged Emacs environment and launcher in `nix develop`; Stringbed, Magit Section and Transient loaded under `--quick` |
 
 The preceding PR revision's GitHub workflow failed because apt-installed Nix
 could not access its daemon socket. CI now installs Nix explicitly and runs the
 interface checks in `nix develop`, so Emacs package availability under `--quick`
-does not depend on distribution site initialization. Remote CI results are
-reported on the PR separately from these local checks.
+does not depend on distribution site initialization. Workflow run
+[44257224461](https://github.com/Mihir-Null/Stringbed/actions/runs/44257224461)
+passed at `7be4f78`. New VUI/builder checks are recorded separately below.
 
 The local execution environment lost parts of `/nix/store` after the successful
 launcher build. A bounded repair did not recover the full closure. The final
-source passed the tests above, but its exact packaged rebuild remains a remote
-CI gate; an earlier snapshot's build is not labelled as that final rebuild.
+source passed the tests above, and the subsequent remote CI run passed its
+packaged development environment checks.
 
 ```sh
 nix develop --command bash tests/check.sh
@@ -40,8 +69,8 @@ nix build .#emacs      # pinned standalone terminal launcher
 
 Broad package searching evaluates upstream nixpkgs and can remain expensive;
 the UI exposes progress, cancellation and exact lookup. Scope-specific overlays
-are not represented in the upstream package catalogue. VUI focus experiments,
-a visual module-definition builder and machine activation remain separate gates.
+are not represented in the upstream package catalogue. Machine activation remains
+a separate gate.
 
 ## Prior fleet-library baseline
 

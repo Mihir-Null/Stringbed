@@ -2,11 +2,11 @@
 
 ## Scope of this development pass
 
-The current checkpoint replaces the default editing interface with an Emacs
-workbench. The first hands-on review found that package IDs disguised unrelated
-defaults, option editing lacked semantic checks, and provenance was unreadable.
-Machine reconstruction is paused until the discovery/edit/inspect/save flow is
-usable. No live fleet activation, migration or deletion is part of this pass.
+The current checkpoint adds VUI forms and a visual module builder to the Emacs
+workbench. Package discovery, typed option checks and readable provenance remain
+the foundation; reusable modules can now have an editable data definition and an
+inspectable Racket implementation. Machine reconstruction is paused for hands-on
+review. No live fleet activation, migration or deletion is part of this pass.
 
 The product is a programmable environment for authoring and operating Nix
 configuration. Its default vocabulary is extensible Racket, not a closed schema
@@ -151,7 +151,7 @@ a value checked against the selected scope's pinned Nix option type.
 | Decision | Reason | Alternative |
 |---|---|---|
 | Ordinary Emacs package plus pinned terminal launcher | Reuse the user's editor or launch a predictable standalone interface | Separate new terminal and graphical implementations would duplicate interaction behavior |
-| `magit-section` trees, native widgets, `tabulated-list-mode`, `transient` | Each view has one rendering/focus owner; tables and forms use mature Emacs controls | VUI remains a candidate for reactive forms; combining VUI and tui.el adds overlapping state/focus ownership |
+| `magit-section` trees, VUI forms, `tabulated-list-mode`, `transient` | Each buffer has one rendering/focus owner; keyed VUI controls retain in-progress edits | Mixing VUI and tui.el in the same form would duplicate state and focus ownership |
 | Versioned UTF-8 JSON Lines | Both runtimes have data parsers; booleans, null, arrays and objects have an explicit shared vocabulary | Native s-expression readers differ in booleans, hash syntax and executable reader extensions |
 | Racket session is the edit authority | Existing validation, undo and atomic persistence remain shared | A second Elisp configuration model would drift |
 | Immutable query snapshots and exact lock reuse | Background results can identify their source and pin; edits cannot silently update inputs | Ambient nixpkgs channels or mutable export directories hide revision changes |
@@ -183,6 +183,44 @@ Verification proceeds through protocol and query contracts, typed forms and
 stale responses, preservation/reopen/undo, then an actual terminal Emacs session.
 The standalone launcher and package integration are separate checks. A green
 batch Elisp load is not evidence that focus, navigation or interaction works.
+
+#### Visual module definitions
+
+`module-builder.rkt` owns the versioned data definition and its deterministic
+Racket projection. A definition declares typed parameters, option assignments
+and compositions of loaded forms, with notes and documentation links. Bindings
+are tagged literal values or parameter references; strings are never evaluated
+as Racket or Nix source. The builder validates names, bindings and parameter
+types before generating a bundle. Native Nix validation remains a separate,
+explicit check against the selected scope and input lock.
+
+VUI owns the full editing buffer. Raw malformed text remains visible and blocks
+submission; the client must not silently submit an earlier valid value. The
+backend owns structural validation, expansion, source generation and persistence.
+JSON false, null, empty arrays and empty objects keep their distinct meanings.
+
+Saved bundles contain the data definition and ordinary generated `main.rkt`.
+External compositions capture verified dependency bundles and use relative
+imports. Generated code shares the canonical extension API rather than copying
+its structures. Builtin compositions record their implementation digest; a
+changed builtin implementation requires explicit regeneration. The generated
+module does not depend on the mutable visual-builder runtime.
+
+Opening a builder definition reads data and verifies its source identity. Hand
+changes to generated source are not reverse-engineered or overwritten. Editing
+an immutable pinned bundle requires a working derivative. Repeated saves use an
+expected bundle revision, stage the new content, preserve unrelated files, and
+retain a recoverable previous directory. Saving a definition does not pin it or
+change workspace instances.
+
+Pinning stages a verified immutable snapshot and constructs a candidate registry.
+The current workspace must validate with that registry before the extension lock
+and live registry are adopted. A stale lock or failed load/validation leaves the
+old lock, registry and workspace revision intact. This is an explicit executable
+extension trust boundary, separate from editing the data-only definition.
+
+See the [module builder walkthrough](docs/module-builder.md) and
+[wire contract](docs/emacs-protocol.md) for the public operations.
 
 #### Shared and legacy interfaces
 
@@ -307,9 +345,8 @@ provenance limitation are exposed behaviors to assess in the joint pass.
 - [Racket namespaces and module instances](https://docs.racket-lang.org/guide/mk-namespace.html)
 - [Racket JSON data representation](https://docs.racket-lang.org/json/)
 - [Magit Section as an independent package](https://docs.magit.vc/devel/magit-section/)
-- [Emacs native widget programming](https://www.gnu.org/software/emacs/manual/html_node/widget/Programming-Example.html)
 - [Terminal mouse support](https://www.gnu.org/software/emacs/manual/html_node/emacs/Text_002dOnly-Mouse.html)
-- [VUI](https://github.com/d12frosted/vui.el) — deferred reactive-form experiment
+- [VUI](https://github.com/d12frosted/vui.el/tree/004dd852746d8af838107dd7e3f44c5bbea04d79) — pinned form renderer
 - [Racket GUI](https://docs.racket-lang.org/gui/)
 - [Nix manual](https://nix.dev/manual/nix/latest/)
 - [NixOS manual: modules](https://nixos.org/manual/nixos/stable/#sec-writing-modules)

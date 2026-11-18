@@ -4,17 +4,34 @@
 (provide load-registry execute! describe-workspace)
 (define-runtime-path builtin-source "builtins.rkt")
 (define (load-registry [extensions '()] [base (current-directory)] #:workspace [workspace #f]
-                       #:sources [sources #f])
+                       #:sources [sources #f] #:lock [candidate-lock #f])
+  (define active-lock (and workspace (verify-extension-lock! workspace #:lock candidate-lock)))
   (define (record path forms #:locked? [locked? #f])
     (when sources
+      (define absolute (simplify-path (path->complete-path path)))
+      (define identity
+        (and locked?
+             (for/first ([(id entry) (in-hash (hash-ref active-lock 'extensions))]
+                         #:when (equal? absolute
+                                        (simplify-path
+                                         (build-path (path-only (path->complete-path workspace))
+                                                     ".stringbed" "extensions" (hash-ref entry 'sha256)
+                                                     (hash-ref entry 'entry)))))
+               (hash 'extensionId id 'bundleSha256 (hash-ref entry 'sha256)
+                     'entry (hash-ref entry 'entry)
+                     'bundleDirectory
+                     (path->string (build-path (path-only (path->complete-path workspace))
+                                              ".stringbed" "extensions" (hash-ref entry 'sha256)))))))
       (for ([d forms])
         (hash-set! sources (form-kind d)
-                   (hash 'path (path->string (simplify-path (path->complete-path path)))
-                         'sha256 (bytes-digest (file->bytes path)) 'locked locked?)))))
+                   (for/fold ([metadata (hash 'path (path->string absolute)
+                                             'sha256 (bytes-digest (file->bytes path)) 'locked locked?)])
+                             ([(key value) (in-hash (or identity (hash)))])
+                     (hash-set metadata key value))))))
   (record builtin-source builtin:forms)
   (make-registry
    (append builtin:forms
-           (if workspace (load-locked-extensions workspace #:on-load (lambda (path forms) (record path forms #:locked? #t))) '())
+           (if workspace (load-locked-extensions workspace #:lock active-lock #:on-load (lambda (path forms) (record path forms #:locked? #t))) '())
            (append-map
             (lambda (p)
               (define path (simplify-path (path->complete-path p base)))

@@ -1,6 +1,6 @@
 # Development state
 
-Current assignment: the Emacs frontend checkpoint following hands-on review.
+Current assignment: VUI forms and the visual module builder following hands-on review.
 Root `architecture.md` is the design authority. Machine reconstruction is paused
 until the existing review workspace has passed the [interaction walkthrough](emacs.md).
 
@@ -12,9 +12,10 @@ environmental gates; implementation is not fleet deployment approval.
 
 The new package uses a versioned asynchronous JSON protocol, preserves existing
 workspace IDs/history, discovers pinned packages/options and validates typed
-option edits with Nix. Native widgets own forms; Magit Section owns trees and
-provenance; tabulated lists own catalogues. VUI and a visual module-definition
-builder remain deferred. Existing extension forms are configurable and inspectable.
+option edits with Nix. VUI owns forms; Magit Section owns trees and provenance;
+tabulated lists own catalogues. The visual module builder declares parameters,
+assignments and compositions, saves data definitions with generated Racket, and
+pins validated bundles explicitly. See the [builder walkthrough](module-builder.md).
 
 Next: review the preserved `mcqueenix-review/home.sbd` workspace in Emacs, record
 remaining friction, then recreate selected real EmptyNet modules and one machine.

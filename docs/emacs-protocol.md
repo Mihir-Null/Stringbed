@@ -37,6 +37,14 @@ strings. Nix expressions and Racket procedures are never accepted as wire values
 | `diff` | `{}` | `{text,changes:[{id,label,status,before,after}]}` |
 | `export` | `directory` | `{directory,workspaceSha256,lockSha256}` |
 | `evaluate`, `build` | `{}` | backend result, never activation |
+| `builder/new` | optional `kind` | `{spec,forms,editable:true}` |
+| `builder/inspect` | `kind` or `directory` | data inspection: `{spec?,forms,source,directory?,revision?,editable,immutable,reason?,extensionId?}` |
+| `builder/preview` | `spec`, optional `values`, `scope`, `sourceDirectory`, `validate` | `{spec,racket,definitions,diagnostics,validation,nativeValidation,forms}` |
+| `builder/save` | `spec`, `directory`, optional `sourceDirectory`, `expectedRevision` | saved bundle metadata, `revision`, `sourceSha256`, `reviewDigest`, optional `backupDirectory` |
+| `builder/derive` | loaded generated `kind`, new `directory` | saved working derivative metadata plus `extensionId` |
+| `builder/pin` | `directory`, `extensionId`, `reviewDigest` | `{workspace,forms,bundle:{directory,entry,sha256}}`, advances session revision |
+| `builder/reload` | `{}` | `{workspace,forms}`, advances session revision |
+| `builder/refresh-builtins` | `spec` | `{spec,message}`, refreshes only direct builtin identity in the returned draft |
 | `cancel` | `request` request ID | `{cancelled:boolean}` |
 
 A workspace view is `{path,name,target,system,dirty,undoAvailable,readOnly,
@@ -58,3 +66,45 @@ For a package, evaluated provenance queries the scope's `home.packages` or
 `environment.systemPackages` option and labels the result a shared package
 collection. It does not infer exact selected-package membership or causal origins.
 Option nodes query their selected option directly.
+
+Builder specifications use the data schema in [module-builder.md](module-builder.md).
+Builder candidates carry `{kind,description,fields,source,available,reason}`;
+`source` is `{kind:"builtin"}` or `{kind:"bundle",sha256,entry}`. Development
+extensions without a captured bundle are unavailable for composition. Sources
+are matched by exact identity, including the entry point. Two revisions of the
+same child kind in one builder are rejected rather than silently conflated.
+
+Inspection reads data and verifies receipts without executing code. A pinned
+generated bundle has a `spec` but `editable:false`, `immutable:true`, and
+`source.locked:true`; `builder/derive` makes a separate editable copy. Handwritten
+Racket has no reconstructible spec and returns an explanatory `reason`.
+Explicit trusted preview/save may load receipt-verified child dependencies from
+`sourceDirectory` into a temporary registry, allowing a portable composition to
+work without separately installing its children. Preview returns their resolved
+field descriptors in `forms`; clients retain existing bindings while descriptors
+are unavailable. This does not modify the active registry or evaluate received
+Racket text. Generated `main.rkt` loads only on explicit pin/reload.
+
+Preview always labels structural expansion separately from native Nix checks.
+With `validate:true`, a prepared input context checks ordinary emitted assignment
+paths and values in the selected scope. `nativeValidation.state` is
+`not-evaluated`, `needs-lock`, `type-valid`, `partial`, `invalid`, or `error`; per-definition
+results include diagnostic `field` paths. Executable Nix values/imports require
+full workspace evaluation. Successful option type checks do not prove assertions,
+merge compatibility, or activation behavior.
+Unavailable query processes are errors, not evidence of an invalid option value.
+
+Saving an existing working directory requires its last `revision` as
+`expectedRevision`. Exact old contents receive a recoverable backup; external
+source/spec changes and immutable snapshots are rejected. Saving a bundle does
+not pin it or alter the workspace. `reviewDigest` is the entire saved bundle's
+identity, distinct from `sourceSha256` for generated Racket alone.
+
+Pinning checks the reviewed digest, session/revision, workspace source baseline,
+and extension-lock baseline. While holding the cooperating-writer lock it loads
+and validates a candidate registry and serializes its views before adopting the
+new lock and registry. A rejected candidate preserves the prior lock, registry,
+draft, history, and revision. Reload stages and validates the same way. These
+actions do not save the workspace or enter its authored-edit undo history;
+previous immutable bundles remain available. Snapshot integrity is not a sandbox
+or proof of every dependency an arbitrary trusted Racket module might import.

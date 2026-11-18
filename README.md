@@ -4,11 +4,11 @@ A programmable Racket workbench for Nix configuration. Add packages, compose
 modules, attach your notes, and inspect authored intent alongside Nix's evaluated
 configuration. Nix retains its module, package and build semantics.
 
-**0.3 development workbench:** an Emacs frontend for discovery, typed editing,
-annotations and provenance, backed by durable Racket sessions and pinned Nix
-queries. NixOS/Home Manager scopes, explicit lifecycle plans and the independent
-fleet library remain available. Machine reconstruction is paused for frontend
-review. See [architecture.md](architecture.md) for contracts and limitations.
+**0.4 development workbench:** VUI forms and a visual module builder join the
+Emacs discovery, typed editing, annotations and provenance flow. Reusable modules
+have data definitions and inspectable Racket source, backed by durable sessions
+and pinned Nix queries. Machine reconstruction is paused for frontend review.
+See [architecture.md](architecture.md) for contracts and limitations.
 
 ## Start
 
@@ -24,7 +24,8 @@ Press `a` to search packages, `o` for options, `?` for actions, `s` to save and
 `u` to undo. Catalogues have sortable columns; `RET` inspects a result and `a`
 adds the selected package. Option forms use typed controls and validate before
 changing the draft. See the [Emacs walkthrough](docs/emacs.md) for input locking,
-package integration, provenance and source navigation.
+package integration, provenance and source navigation. Press `B` to open the
+[visual module builder](docs/module-builder.md).
 
 For a **new** workspace, initialize once and set its metadata. Existing
 workspaces do not need initialization or automatic migration:
@@ -98,6 +99,12 @@ data without loading any extension or plugin. Generators may use arbitrary
 Racket; generated data records its source but does not invert the computation.
 See [extension API](docs/extensions.md).
 
+The [visual module builder](docs/module-builder.md) creates reusable forms from
+typed parameters, option assignments and compositions. Save an editable bundle,
+review its Racket/Nix preview, then explicitly pin it into the workspace.
+Hand-written extensions remain ordinary Racket; arbitrary source is not converted
+back into visual controls.
+
 Structured notes/docs are preserved by edits. Canonical saves normalize raw
 Racket comments/formatting; exact previous bytes are retained in
 `.stringbed/sources/<sha256>`. `migrate FILE` explicitly upgrades schema 1 with an
@@ -138,6 +145,6 @@ implementations remain with their producers.
 - [Capability ownership ledger](packages/fleet-library/MIGRATION.md)
 
 Run `bash tests/check.sh` for local automated tests (Racket, Nix, Emacs with
-Magit Section/Transient, Python 3 and Xvfb required).
+Magit Section, VUI/Transient, Python 3 and Xvfb required).
 The full Nix fixture check is `bash tests/fleet-library.sh`.
 NWM inspired source/structure interaction; no implementation was copied.

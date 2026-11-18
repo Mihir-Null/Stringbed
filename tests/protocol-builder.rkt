@@ -1,0 +1,237 @@
+#lang racket/base
+(require rackunit racket/file racket/list racket/path racket/string racket/port json
+         "../stringbed/protocol.rkt" "../stringbed/model.rkt" "../stringbed/durability.rkt"
+         "../stringbed/operations.rkt")
+(define (ok reply)
+  (check-false (hash-has-key? reply 'error) (format "~s" reply))
+  (hash-ref reply 'result))
+(define (error-code reply) (hash-ref (hash-ref reply 'error) 'code))
+(define (client path #:data-only? [data-only? #f])
+  (define b (make-backend))
+  (define token 'null) (define revision 0) (define id 0)
+  (define (send method [params (hash)] #:revision [expected revision])
+    (set! id (add1 id))
+    (define reply (protocol-handle b (hash 'v 1 'id id 'method method 'params params 'session token 'revision expected)))
+    (when (hash-has-key? reply 'result)
+      (set! token (hash-ref reply 'session)) (set! revision (hash-ref reply 'revision)))
+    reply)
+  (ok (send "open" (hash 'path (path->string path) 'dataOnly data-only?))) send)
+(define (fixture body)
+  (define dir (make-temporary-file "protocol-builder-~a" 'directory))
+  (dynamic-wind void
+    (lambda ()
+      (define path (build-path dir "review.sbd"))
+      (display-to-file (workspace-text (new-workspace "builder-review")) path)
+      (body dir path (client path)))
+    (lambda () (delete-directory/files dir))))
+(define simple-spec
+  (hash 'schema 1 'kind "git-tools" 'description "Choose Git enablement"
+        'parameters (list (hash 'name "enabled" 'type "boolean" 'default #t 'description "Enable Git"))
+        'assignments (list (hash 'path '("programs" "git" "enable") 'value (hash 'parameter "enabled")))
+        'compositions '() 'note "Personal module" 'docs '("https://git-scm.com/docs") 'sources '()))
+(define (save send directory [spec simple-spec] #:expected [expected #f] #:source [source #f])
+  (define params (hash 'spec spec 'directory (path->string directory)))
+  (define with-expected (if expected (hash-set params 'expectedRevision expected) params))
+  (ok (send "builder/save" (if source (hash-set with-expected 'sourceDirectory (path->string source)) with-expected))))
+(define (pin send saved [id "git-tools"])
+  (send "builder/pin" (hash 'directory (hash-ref saved 'directory) 'extensionId id 'reviewDigest (hash-ref saved 'reviewDigest))))
+
+(test-case "builder schema and preview are data-only; native validation is explicit"
+  (fixture
+   (lambda (dir path send)
+     (define created (ok (send "builder/new")))
+     (check-equal? (hash-ref (hash-ref created 'spec) 'kind) "my-module")
+     (check-true (andmap (lambda (item) (hash-ref item 'available)) (hash-ref created 'forms)))
+     (define preview (ok (send "builder/preview" (hash 'spec simple-spec 'values (hash 'enabled #f) 'scope "home"))))
+     (check-equal? (hash-ref preview 'validation) "structural-only")
+     (check-equal? (hash-ref (hash-ref preview 'nativeValidation) 'state) "not-evaluated")
+     (check-equal? (hash-ref (car (hash-ref preview 'definitions)) 'value) #f)
+     (check-true (string-contains? (hash-ref preview 'racket) "#lang racket/base"))
+     (check-false (hash-ref (ok (send "workspace")) 'dirty))
+     (define bad (send "builder/preview" (hash 'spec (hash-set simple-spec 'source "(system \"bad\")"))))
+     (check-equal? (error-code bad) "unknown-field")
+     (check-equal? (hash-ref (hash-ref bad 'error) 'field) "spec")
+     (define needed (ok (send "builder/preview" (hash 'spec simple-spec 'validate #t))))
+     (check-equal? (hash-ref (hash-ref needed 'nativeValidation) 'state) "needs-lock"))))
+
+(test-case "save and explicit pin expose a form; use, persist and reopen preserve its meaning"
+  (fixture
+   (lambda (dir path send)
+     (define original (file->bytes path))
+     (define saved (save send (build-path dir "working")))
+     (check-equal? (file->bytes path) original)
+     (check-false (file-exists? (extension-lock-path path)))
+     (define pinned (ok (pin send saved)))
+     (check-not-false (findf (lambda (f) (equal? (hash-ref f 'kind) "git-tools")) (hash-ref pinned 'forms)))
+     (check-false (hash-ref (hash-ref pinned 'workspace) 'dirty))
+     (define added (ok (send "add" (hash 'kind "git-tools" 'values (hash 'enabled #f) 'scope "home"))))
+     (define node (hash-ref added 'selectedId))
+     (define text (hash-ref (ok (send "nix" (hash 'node node))) 'text))
+     (check-true (string-contains? text "\"programs\".\"git\".\"enable\" = false;"))
+     (ok (send "save"))
+     (define reopen (client path))
+     (check-equal? (hash-ref (ok (reopen "nix" (hash 'node node))) 'text) text)
+     (check-equal? (hash-ref (car (hash-ref (ok (reopen "workspace")) 'nodes)) 'id) node))))
+
+(test-case "derivative edits leave snapshots intact; incompatible pin preserves lock, revision and live registry"
+  (fixture
+   (lambda (dir path send)
+     (define saved (save send (build-path dir "original")))
+     (ok (pin send saved))
+     (define added (ok (send "add" (hash 'kind "git-tools" 'values (hash 'enabled #t)))))
+     (define node (hash-ref added 'selectedId))
+     (define inspected (ok (send "builder/inspect" (hash 'kind "git-tools"))))
+     (check-true (hash-ref inspected 'immutable))
+     (define snapshot-dir (hash-ref inspected 'directory))
+     (define snapshot-bytes (file->bytes (build-path snapshot-dir "main.rkt")))
+     (define via-directory (ok (send "builder/inspect" (hash 'directory snapshot-dir))))
+     (check-true (hash-ref (hash-ref via-directory 'source) 'locked))
+     (define derivative (ok (send "builder/derive" (hash 'kind "git-tools" 'directory (path->string (build-path dir "derivative"))))))
+     (define changed (hash-set* simple-spec
+                               'parameters (list (hash 'name "count" 'type "integer" 'default 1 'description "Changed API"))
+                               'assignments (list (hash 'path "programs.git.enable" 'value (hash 'literal #t)))))
+     (define edited (save send (build-path dir "derivative") changed #:expected (hash-ref derivative 'revision)))
+     (check-equal? (file->bytes (build-path snapshot-dir "main.rkt")) snapshot-bytes)
+     (define lock-before (file->bytes (extension-lock-path path)))
+     (define before (send "workspace"))
+     (define refused (pin send edited))
+     (check-true (hash-has-key? refused 'error))
+     (check-equal? (hash-ref refused 'revision) (hash-ref before 'revision))
+     (check-equal? (file->bytes (extension-lock-path path)) lock-before)
+     (check-true (string-contains? (hash-ref (ok (send "nix" (hash 'node node))) 'text) "enable\" = true"))
+     (define form (findf (lambda (item) (equal? (hash-ref item 'kind) "git-tools")) (ok (send "forms"))))
+     (check-equal? (hash-ref (car (hash-ref form 'fields)) 'name) "enabled"))))
+
+(test-case "stale review, revision and external lock changes cannot silently repin"
+  (fixture
+   (lambda (dir path send)
+     (define saved (save send (build-path dir "working")))
+     (define bad (send "builder/pin" (hash 'directory (hash-ref saved 'directory) 'extensionId "git-tools" 'reviewDigest (make-string 64 #\0))))
+     (check-equal? (error-code bad) "builder-drift")
+     (check-false (file-exists? (extension-lock-path path)))
+     (ok (pin send saved))
+     (define target (build-path dir "stale"))
+     (check-equal? (error-code (send "builder/save" (hash 'spec simple-spec 'directory (path->string target)) #:revision 0)) "stale-revision")
+     (check-false (directory-exists? target))
+     (define outside (build-path dir "outside")) (make-directory outside)
+     (display-to-file "#lang racket/base\n(provide forms)\n(define forms '())\n" (build-path outside "main.rkt"))
+     (pin-extension! path "outside" outside "main.rkt")
+     (define external-lock (file->bytes (extension-lock-path path)))
+     (check-equal? (error-code (pin send saved)) "extension-drift")
+     (check-equal? (file->bytes (extension-lock-path path)) external-lock)
+     (ok (send "builder/reload"))
+     (ok (pin send saved))
+     (check-true (hash-has-key? (hash-ref (read-extension-lock path) 'extensions) "outside")))))
+
+(test-case "data-only inspection cannot preview trusted forms, save bundles or pin"
+  (fixture
+   (lambda (dir path send)
+     (define inspect (client path #:data-only? #t))
+     (check-equal? (error-code (inspect "builder/preview" (hash 'spec simple-spec))) "read-only")
+     (check-equal? (error-code (inspect "builder/save" (hash 'spec simple-spec 'directory (path->string (build-path dir "no"))))) "read-only")
+     (check-false (directory-exists? (build-path dir "no")))
+     (define handwritten (ok (send "builder/inspect" (hash 'kind "package"))))
+     (check-false (hash-ref handwritten 'editable))
+     (check-true (string? (hash-ref handwritten 'reason))))))
+
+(test-case "composition identities and child bindings are checked before save"
+  (fixture
+   (lambda (dir path send)
+     (define source (hash 'kind "bundle" 'sha256 (make-string 64 #\0) 'entry "main.rkt"))
+     (define comp (hash 'id "search" 'kind "package" 'source source 'bindings (hash 'attribute (hash 'literal "ripgrep"))))
+     (define forged (hash-set simple-spec 'compositions (list comp)))
+     (check-equal? (error-code (send "builder/preview" (hash 'spec forged))) "composition-unavailable")
+     (define target (build-path dir "forged"))
+     (check-equal? (error-code (send "builder/save" (hash 'spec forged 'directory (path->string target)))) "composition-unavailable")
+     (check-false (directory-exists? target))
+     (define bad-binding (hash-set comp 'source (hash 'kind "builtin")))
+     (define bad-spec (hash-set simple-spec 'compositions (list (hash-set bad-binding 'bindings (hash 'unknown (hash 'literal #t))))))
+     (check-true (hash-has-key? (send "builder/save" (hash 'spec bad-spec 'directory (path->string target))) 'error))
+     (check-false (directory-exists? target)))))
+
+(test-case "native preview validation distinguishes invalid values and unprepared or partial evaluations"
+  (fixture
+   (lambda (dir path send)
+     (define lock (build-path dir "flake.lock"))
+     (display-to-file "{\"version\":7,\"nodes\":{}}" lock)
+     (ok (send "context" (hash 'lockFile (path->string lock))))
+     (define numeric (hash-set* simple-spec
+                              'parameters (list (hash 'name "enabled" 'type "integer" 'default 5 'description "Wrong native type"))))
+     (parameterize ([current-runner
+                     (lambda (program args)
+                       (if (string-contains? (last args) "candidate =")
+                           "{\"exists\":true,\"valid\":false}"
+                           "{\"path\":\"programs.git.enable\",\"type\":\"boolean\",\"control\":{\"kind\":\"boolean\"},\"default\":false,\"description\":\"Git\",\"declarations\":[]}"))])
+       (define preview (ok (send "builder/preview" (hash 'spec numeric 'validate #t))))
+       (define validation (hash-ref preview 'nativeValidation))
+       (check-equal? (hash-ref validation 'state) "invalid")
+       (check-equal? (hash-ref (car (hash-ref validation 'results)) 'field) "definitions.0.value")
+       (check-false (hash-ref (ok (send "workspace")) 'dirty)))
+     (parameterize ([current-runner (lambda args (error 'process "Nix unavailable for this fixture"))])
+       (define failed (ok (send "builder/preview" (hash 'spec numeric 'validate #t))))
+       (check-equal? (hash-ref (hash-ref failed 'nativeValidation) 'state) "error")))))
+
+(test-case "portable-only composition remains inspectable and editable through captured trusted children"
+  (fixture
+   (lambda (dir path send)
+     (define bundle (build-path dir "child")) (make-directory bundle)
+     (define marker (build-path dir "loaded-child"))
+     (display-to-file "#lang racket/base\n(provide enabled-default)\n(define enabled-default #t)\n" (build-path bundle "helper.rkt"))
+     (display-to-file
+      (format "#lang racket/base\n(require racket/file stringbed/extension \"helper.rkt\")\n(provide forms)\n(display-to-file \"loaded\" ~s #:exists 'truncate)\n(define forms (list (form 'captured-web \"Captured child\" (list (field 'enabled 'boolean enabled-default \"Enable\")) (lambda (p w) (list (assignment '(\"programs\" \"git\" \"enable\") (hash-ref p 'enabled)))))))\n" (path->string marker))
+      (build-path bundle "main.rkt"))
+     (pin-extension! path "child" bundle "main.rkt")
+     (ok (send "builder/reload"))
+     (define candidates (hash-ref (ok (send "builder/new")) 'forms))
+     (define child (findf (lambda (f) (equal? (hash-ref f 'kind) "captured-web")) candidates))
+     (define composed
+       (hash-set* simple-spec 'kind "portable-web" 'assignments '()
+                  'compositions (list (hash 'id "web" 'kind "captured-web" 'source (hash-ref child 'source)
+                                            'bindings (hash 'enabled (hash 'parameter "enabled"))))))
+     (define saved (save send (build-path dir "portable") composed))
+     (define fresh-path (build-path dir "fresh.sbd"))
+     (display-to-file (workspace-text (new-workspace "fresh")) fresh-path)
+     (define fresh (client fresh-path))
+     (ok (pin fresh saved "portable"))
+     (delete-directory/files bundle)
+     (when (file-exists? marker) (delete-file marker))
+     (define inspected (ok (fresh "builder/inspect" (hash 'kind "portable-web"))))
+     (check-false (file-exists? marker) "Data inspection must not execute a captured child.")
+     (check-false (findf (lambda (f) (equal? (hash-ref f 'kind) "captured-web")) (ok (fresh "forms"))))
+     ;; An ambient form with the same name must not replace the captured meaning.
+     (define ambient (build-path dir "ambient")) (make-directory ambient)
+     (display-to-file
+      "#lang racket/base\n(require stringbed/extension)\n(provide forms)\n(define forms (list (form 'captured-web \"Different ambient source\" (list (field 'enabled 'boolean #t \"Ignored here\")) (lambda (p w) (list (assignment '(\"programs\" \"git\" \"enable\") #t))))))\n"
+      (build-path ambient "main.rkt"))
+     (define ambient-pin (pin-extension! fresh-path "ambient" ambient "main.rkt"))
+     (ok (fresh "builder/reload"))
+     (define derivative
+       (ok (fresh "builder/derive" (hash 'kind "portable-web" 'directory (path->string (build-path dir "portable-derivative"))))))
+     (define preview
+       (ok (fresh "builder/preview" (hash 'spec (hash-ref derivative 'spec)
+                                          'sourceDirectory (hash-ref derivative 'directory)
+                                          'values (hash 'enabled #f)))))
+     (check-false (hash-ref (car (hash-ref preview 'definitions)) 'value))
+     (define resolved (findf (lambda (f) (equal? (hash-ref f 'kind) "captured-web")) (hash-ref preview 'forms)))
+     (check-equal? (hash-ref (car (hash-ref resolved 'fields)) 'name) "enabled")
+     (check-equal? (hash-ref resolved 'description) "Captured child")
+     (define still-ambient (findf (lambda (f) (equal? (hash-ref f 'kind) "captured-web")) (ok (fresh "forms"))))
+     (check-equal? (hash-ref (hash-ref still-ambient 'source) 'bundleSha256) (hash-ref ambient-pin 'sha256)
+                   "Preview must not replace the active registry.")
+     (void (save fresh (build-path dir "portable-derivative") (hash-set composed 'note "Portable revision")
+                 #:expected (hash-ref derivative 'revision))))))
+
+(test-case "direct builtin identity refresh is an explicit unsaved draft action"
+  (fixture
+   (lambda (dir path send)
+     (define composed
+       (hash-set* simple-spec 'compositions
+                  (list (hash 'id "search" 'kind "package" 'source (hash 'kind "builtin")
+                              'bindings (hash 'attribute (hash 'literal "ripgrep"))))
+                  'builtinSha256 (make-string 64 #\0)))
+     (check-equal? (error-code (send "builder/preview" (hash 'spec composed))) "builtin-drift")
+     (define refreshed (hash-ref (ok (send "builder/refresh-builtins" (hash 'spec composed))) 'spec))
+     (check-not-equal? (hash-ref refreshed 'builtinSha256) (hash-ref composed 'builtinSha256))
+     (ok (send "builder/preview" (hash 'spec refreshed)))
+     (check-false (hash-ref (ok (send "workspace")) 'dirty))
+     (check-false (file-exists? (extension-lock-path path))))))

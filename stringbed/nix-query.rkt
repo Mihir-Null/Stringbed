@@ -86,7 +86,7 @@
        else if builtins.elem name [ "int" "intBetween" "unsignedInt" "positiveInt" ] then { kind = "integer"; }
        else if numericEither || builtins.elem name [ "float" "number" "numberBetween" "numberNonnegative" "numberPositive" ] then { kind = "number"; }
        else if lib.hasPrefix "strMatching " name || builtins.elem name [ "str" "lines" "singleLineStr" "nonEmptyStr" "string" "separatedString" ] then { kind = "string"; }
-       else if builtins.elem name [ "attrs" "attrsOf" "lazyAttrsOf" "submodule" "submoduleWith" "anything" ] then { kind = "structured"; }
+       else if builtins.elem name [ "attrs" "attrsOf" "lazyAttrsOf" "submodule" "submoduleWith" ] then { kind = "structured"; }
        else { kind = "advanced"; };
   describe = option: {
     path = lib.concatStringsSep "." (optionPath option);

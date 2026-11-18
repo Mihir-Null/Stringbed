@@ -131,7 +131,7 @@
     (if package?
         (simplify-path (build-path directory 'up 'up 'up "package-cache-v2"
                                   (hash-ref context 'lock-sha256) (digest-text (hash-ref context 'system))))
-        (build-path (path-only (string->path directory)) "cache-v2")))
+        (build-path (path-only (string->path directory)) "cache-v3")))
   (define cache-file (build-path cache-directory (string-append (digest-text (format "~s" key)) ".json")))
   (cond [(file-exists? cache-file) (values (json-file cache-file) #t)]
         [else

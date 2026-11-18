@@ -19,6 +19,8 @@ snapshots and query locks. Opening does not rewrite the workspace or change IDs.
    implementation. `C-u w` requests evaluated provenance from the current pin.
 5. Use `l` for loaded forms, their parameters and implementation revisions.
    Existing extension forms can create new instances through generated controls.
+   Press `B` for the [visual module builder](module-builder.md), or choose a
+   loaded builder form's **Create working derivative** action in the language view.
 6. Press `d` to review changes, then `s` to save. Use `? r` to reopen and `u`
    to undo; save again to persist the undo. `? E`, `? v` and `? b` export,
    evaluate and build. The frontend has no activation command.
@@ -38,10 +40,14 @@ reflected in that catalogue; option discovery uses the actual selected scope.
 
 ## In your existing Emacs
 
-Install [Magit Section](https://docs.magit.vc/devel/magit-section/) and optionally
-[Transient](https://magit.vc/manual/transient/), add `emacs/` to `load-path`, then:
+Use Emacs 29.1 or newer. Install
+[Magit Section](https://docs.magit.vc/devel/magit-section/),
+[Transient](https://magit.vc/manual/transient/) and the pinned VUI revision below,
+add `emacs/` to `load-path`, then load Stringbed:
 
 ```elisp
+(package-vc-install '(vui :url "https://github.com/d12frosted/vui.el")
+                    "004dd852746d8af838107dd7e3f44c5bbea04d79")
 (require 'stringbed)
 ;; When the stringbed executable is on exec-path:
 (setq stringbed-command '("stringbed" "serve"))
@@ -54,6 +60,12 @@ Emacs and does not depend on Kittymacs. Nix consumers can include
 `packages.${system}.emacs-package` in an Emacs package environment. The standalone
 launcher supplies pinned dependencies, a minimal configuration and terminal mouse
 support without loading your personal initialization file.
+
+The flake pins VUI 1.4.0 at that exact commit, including its field focus and
+scrolling fixes. Use the same revision for an ordinary Emacs installation;
+the package version alone does not identify those changes. VUI owns complete
+form buffers, while Magit Section and tabulated lists retain their respective
+workspace/provenance and catalogue views.
 
 ## Trust, values and scope
 
@@ -70,8 +82,10 @@ separate because module assertions and interactions involve the whole workspace.
 Provenance separates authored selections, personal annotations, expansion and
 evaluated results. Integrated Home Manager definition origins remain incomplete.
 The language browser does not reconstruct arbitrary Racket as a visual graph.
-Editing pinned implementations requires a working derivative and explicit repin;
-a visual module-definition builder is a later step.
+The [visual module builder](module-builder.md) edits data definitions for new
+reusable forms and saved builder bundles. Editing pinned implementations requires
+a working derivative and explicit repin. Hand-written Racket remains inspectable
+through source navigation.
 
 Canonical save preserves structured data and makes exact byte backups, but
 normalizes raw source comments/layout. See [architecture](../architecture.md)
